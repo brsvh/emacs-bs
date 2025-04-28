@@ -29,8 +29,41 @@
 
 ;;; Code:
 
-(require 'bs-lib)
 (require 'xdg)
+
+;;;###autoload
+(defun bs-path (&rest segments)
+  "Join SEGMENTS to a path."
+  (let (file-name-handler-alist path)
+    (setq path (expand-file-name (if (cdr segments)
+                                     (apply #'file-name-concat segments)
+                                   (car segments))))
+    (if (file-name-absolute-p (car segments))
+        path
+      (file-relative-name path))))
+
+;;;###autoload
+(defun bs-path* (&rest segments)
+  "Join SEGMENTS to a path, ensure it is exists."
+  (let ((path (apply #'bs-path segments)) dir)
+    (if (file-directory-p path)
+        (setq dir path)
+      (setq dir (file-name-directory path)))
+    (make-directory dir 'parents)
+    path))
+
+;;;###autoload
+(defmacro bs-xdg-dir-home (concept)
+  "Get the value of corresponds XDG Base Directory CONCEPT.
+
+Allowable concepts (not quoted) are `cache', `config', `data' and
+ `state'."
+  (let* ((concepts '((cache . xdg-cache-home)
+                     (config . xdg-config-home)
+                     (data . xdg-data-home)
+                     (state . xdg-state-home)))
+         (func (cdr (assoc concept concepts))))
+    `(bs-path "emacs/" (,func))))
 
 ;;;###autoload
 (defgroup bs nil
@@ -39,25 +72,25 @@
   :group 'emacs)
 
 ;;;###autoload
-(defcustom bs-cache-directory (bs-path "emacs/" (xdg-cache-home))
+(defcustom bs-cache-directory (bs-xdg-dir-home cache)
   "Directory beneath which additional volatile files are placed."
   :group 'bs
   :type 'directory)
 
 ;;;###autoload
-(defcustom bs-config-directory (bs-path "emacs/" (xdg-config-home))
+(defcustom bs-config-directory (bs-xdg-dir-home config)
   "Directory beneath which additional config files are placed."
   :type 'directory
   :group 'bs)
 
 ;;;###autoload
-(defcustom bs-data-directory (bs-path "emacs/" (xdg-data-home))
+(defcustom bs-data-directory (bs-xdg-dir-home data)
   "Directory beneath which additional non-volatile files are placed."
   :group 'bs
   :type 'directory)
 
 ;;;###autoload
-(defcustom bs-state-directory (bs-path "emacs/" (xdg-state-home))
+(defcustom bs-state-directory (bs-xdg-dir-home state)
   "Directory beneath which additional state files are placed."
   :group 'bs
   :type 'directory)
