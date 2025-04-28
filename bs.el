@@ -53,17 +53,25 @@
     path))
 
 ;;;###autoload
-(defmacro bs-xdg-dir-home (concept)
+(defun bs-getenv (environ default-path)
+  (let ((env (getenv environ)))
+    (if (or (null env) (not (file-name-absolute-p env)))
+        (expand-file-name default-path)
+      env)))
+
+;;;###autoload
+(defmacro bs-xdg-dir (concept)
   "Get the value of corresponds XDG Base Directory CONCEPT.
 
 Allowable concepts (not quoted) are `cache', `config', `data' and
  `state'."
-  (let* ((concepts '((cache . xdg-cache-home)
-                     (config . xdg-config-home)
-                     (data . xdg-data-home)
-                     (state . xdg-state-home)))
-         (func (cdr (assoc concept concepts))))
-    `(bs-path "emacs/" (,func))))
+  (let* ((concepts '((cache . ("XDG_CACHE_HOME" . "~/.cache/"))
+                     (config . ("XDG_CONFIG_HOME" . "~/.config/"))
+                     (data . ("XDG_DATA_HOME" . "~/.local/share/"))
+                     (state . ("XDG_STATE_HOME" . "~/.local/state/"))))
+         (env (cadr (assoc concept concepts)))
+         (fallback (cddr (assoc concept concepts))))
+    `(bs-path "emacs/" (bs-getenv ,env ,fallback))))
 
 ;;;###autoload
 (defgroup bs nil
@@ -72,25 +80,25 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
   :group 'emacs)
 
 ;;;###autoload
-(defcustom bs-cache-directory (bs-xdg-dir-home cache)
+(defcustom bs-cache-directory (bs-xdg-dir cache)
   "Directory beneath which additional volatile files are placed."
   :group 'bs
   :type 'directory)
 
 ;;;###autoload
-(defcustom bs-config-directory (bs-xdg-dir-home config)
+(defcustom bs-config-directory (bs-xdg-dir config)
   "Directory beneath which additional config files are placed."
   :type 'directory
   :group 'bs)
 
 ;;;###autoload
-(defcustom bs-data-directory (bs-xdg-dir-home data)
+(defcustom bs-data-directory (bs-xdg-dir data)
   "Directory beneath which additional non-volatile files are placed."
   :group 'bs
   :type 'directory)
 
 ;;;###autoload
-(defcustom bs-state-directory (bs-xdg-dir-home state)
+(defcustom bs-state-directory (bs-xdg-dir state)
   "Directory beneath which additional state files are placed."
   :group 'bs
   :type 'directory)
