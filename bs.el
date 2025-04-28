@@ -71,7 +71,7 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
                      (state . ("XDG_STATE_HOME" . "~/.local/state/"))))
          (env (cadr (assoc concept concepts)))
          (fallback (cddr (assoc concept concepts))))
-    `(bs-path "emacs/" (bs-getenv ,env ,fallback))))
+    `(bs-path (bs-getenv ,env ,fallback) "emacs/")))
 
 ;;;###autoload
 (defgroup bs nil
