@@ -103,5 +103,13 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
   :group 'bs
   :type 'directory)
 
+;;;###autoload
+(defun bs/server-start ()
+  "Allow this Emacs process to be a server for client processes."
+  (interactive)
+  (eval-and-compile
+    (require 'server))
+  (unless (server-running-p) (server-start)))
+
 (provide 'bs)
 ;;; bs.el ends here
