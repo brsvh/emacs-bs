@@ -29,6 +29,7 @@
 
 ;;; Code:
 
+(require 'simple)
 (require 'xdg)
 
 ;;;###autoload
@@ -110,6 +111,22 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
   (eval-and-compile
     (require 'server))
   (unless (server-running-p) (server-start)))
+
+;;;###autoload
+(defun bs/delete-trailing-whitespace (&optional buffer)
+  "Delete trailing whitespaces in BUFFER."
+  (interactive "bBuffer: ")
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer (get-buffer buffer)
+      (delete-trailing-whitespace (point-min) (point-max)))))
+
+;;;###autoload
+(defun bs/untabify (&optional buffer)
+  "Do `untabify' in BUFFER."
+  (interactive "bBuffer: ")
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer (get-buffer buffer)
+      (untabify (point-min) (point-max)))))
 
 (provide 'bs)
 ;;; bs.el ends here
