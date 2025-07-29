@@ -128,5 +128,25 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
     (with-current-buffer (get-buffer buffer)
       (untabify (point-min) (point-max)))))
 
+;;;###autoload
+(defun bs/guess-buffer-major-mode (&optional buffer)
+  "Guess the major mode of a BUFFER."
+  (interactive "bBuffer: ")
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer (get-buffer buffer)
+      (and (set-auto-mode)
+           (not (eq major-mode 'fundamental-mode))))))
+
+;;;###autoload
+(defun bs/guess-file-major-mode (&optional buffer)
+  "Guess the major mode of a BUFFER.
+
+The BUFFER must be saved in a file."
+  (interactive "bBuffer: ")
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer (get-buffer buffer)
+      (and (buffer-file-name (get-buffer buffer))
+           (bs/guess-buffer-major-mode buffer)))))
+
 (provide 'bs)
 ;;; bs.el ends here
