@@ -105,6 +105,12 @@ Allowable concepts (not quoted) are `cache', `config', `data' and
   :type 'directory)
 
 ;;;###autoload
+(defun bs-silencing-message (func &rest args)
+  "Silencing any message of FUNC, around with ARGS."
+  (cl-letf (((symbol-function #'message) #'ignore))
+    (apply func args)))
+
+;;;###autoload
 (defun bs/server-start ()
   "Allow this Emacs process to be a server for client processes."
   (interactive)
