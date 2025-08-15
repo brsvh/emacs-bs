@@ -30,7 +30,69 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'xdg)
+
+(defun bs--genfn (sexp &optional prefix)
+  "Convert SEXP into a function symbol.
+
+The symbol name of function will use PREFIX, default to bs-fn-."
+  (or prefix (setq prefix "bs-fn-"))
+  (cond
+   ((and (symbolp sexp)
+         (fboundp sexp))
+    sexp)
+   ((and (eq (car-safe sexp) 'function)
+         (symbolp (cadr sexp)))
+    (cadr sexp))
+   ((and (consp sexp)
+         (eq (car sexp) 'lambda))
+    (let ((sym (intern (format "%s" (gensym prefix)))))
+      (fset sym (byte-compile sexp))))
+   (t
+    (let ((sym (intern (format "%s" (gensym prefix))))
+          (fn (lambda (&rest args)
+                (ignore args)
+                (eval sexp))))
+      (fset sym (byte-compile fn))
+      sym))))
+
+;;;###autoload
+(defmacro bs-add-hook (hook &rest rest)
+  "Add functions in REST to HOOK.
+
+REST may contain function symbols, lambda functions and keywords that
+describe how to `add-hook'.
+
+Keywords can be :append and :local, with their values corresponding to
+the APPEND and LOCAL parameters in the function `add-hook'."
+  (declare (indent defun))
+  (let* ((append (plist-get rest :append))
+         (local (plist-get rest :local))
+         (sexps (cl-loop for x
+                         in rest
+                         unless (keywordp x)
+                         collect x)))
+    `(dolist (sexp ',sexps)
+       (add-hook ',hook (bs--genfn sexp) ,append ,local))))
+
+;;;###autoload
+(defmacro bs-add-hook* (hook &rest rest)
+  "Add single-use functions in REST to HOOK.
+See `bs-add-hook'."
+  (declare (indent defun))
+  (let* ((append (plist-get rest :append))
+         (local  (plist-get rest :local))
+         (sexps  (cl-loop for x
+                          in rest
+                          unless (keywordp x)
+                          collect x)))
+    `(dolist (sexp ',sexps)
+       (let* ((fn (bs--genfn sexp))
+              (h (intern (format "%s" (gensym "bs-fn-")))))
+         (fset h
+               (lambda ()
+                 (funcall fn)
+                 (remove-hook ',hook h ,local)))
+         (add-hook ',hook h ,append ,local)))))
 
 ;;;###autoload
 (defun bs-path (&rest segments)
