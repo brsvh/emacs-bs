@@ -34,9 +34,9 @@
 
 ;;;###autoload
 (defun bs-lisp-indent-function (indent-point state)
-  "This function is the normal value of the variable `lisp-indent-function'.
-The function `calculate-lisp-indent' calls this to determine
-if the arguments of a Lisp function call should be indented specially.
+  "This function is the override of function `lisp-indent-function'.
+The function `calculate-lisp-indent' calls this to determine if the
+arguments of a Lisp function call should be indented specially.
 
 INDENT-POINT is the position at which the line being indented begins.
 Point is located at the point to indent under (for default indentation);
@@ -47,8 +47,8 @@ variable `lisp-indent-function' (or the deprecated `lisp-indent-hook'),
 it specifies how to indent.  The property value can be:
 
 * `defun', meaning indent `defun'-style
-  (this is also the case if there is no property and the function
-  has a name that begins with \"def\", and three or more arguments);
+  (this is also the case if there is no property and the function has a
+  name that begins with \"def\", and three or more arguments);
 
 * an integer N, meaning indent the first N arguments specially
   (like ordinary function arguments), and then indent any further
@@ -58,8 +58,8 @@ it specifies how to indent.  The property value can be:
   `lisp-indent-function' calls this function with the same two arguments
   that it itself received.
 
-This function returns either the indentation to use, or nil if the
-Lisp function does not specify a special indentation."
+This function returns either the indentation to use, or nil if the Lisp
+function does not specify a special indentation."
   (let ((normal-indent (current-column))
         (orig-point (point)))
     (goto-char (1+ (elt state 1)))
@@ -114,7 +114,8 @@ Lisp function does not specify a special indentation."
 
 ;;;###autoload
 (eval-after-load 'lisp-mode
-  '(advice-add 'lisp-indent-function :override 'bs-lisp-indent-function))
+  '(advice-add 'lisp-indent-function
+               :override 'bs-lisp-indent-function))
 
 (provide 'bs-lisp-mode)
 ;;; bs-lisp-mode.el ends here

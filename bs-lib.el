@@ -37,7 +37,8 @@
   "Join SEGMENTS to a path."
   (let (file-name-handler-alist path)
     (setq path (expand-file-name (if (cdr segments)
-                                     (apply #'file-name-concat segments)
+                                     (apply #'file-name-concat
+                                            segments)
                                    (car segments))))
     (if (file-name-absolute-p (car segments))
         path
