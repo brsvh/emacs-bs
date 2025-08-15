@@ -53,26 +53,6 @@
     (make-directory dir 'parents)
     path))
 
-(defun bs-getenv (environ default-path)
-  "Get the value of ENVIRON, fallback to DEFAULT-PATH."
-  (let ((env (getenv environ)))
-    (if (or (null env) (not (file-name-absolute-p env)))
-        (expand-file-name default-path)
-      env)))
-
-(defmacro bs-xdg-dir (concept)
-  "Get the value of corresponds XDG Base Directory CONCEPT.
-
-Allowable concepts (not quoted) are `cache', `config', `data' and
- `state'."
-  (let* ((concepts '((cache . ("XDG_CACHE_HOME" . "~/.cache/"))
-                     (config . ("XDG_CONFIG_HOME" . "~/.config/"))
-                     (data . ("XDG_DATA_HOME" . "~/.local/share/"))
-                     (state . ("XDG_STATE_HOME" . "~/.local/state/"))))
-         (env (cadr (assoc concept concepts)))
-         (fallback (cddr (assoc concept concepts))))
-    `(bs-path (bs-getenv ,env ,fallback) "emacs/")))
-
 (defun bs-silencing-message (func &rest args)
   "Silencing any message of FUNC, around with ARGS."
   (cl-letf (((symbol-function #'message) #'ignore))

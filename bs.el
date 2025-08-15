@@ -38,22 +38,26 @@
   :prefix "bs-"
   :group 'emacs)
 
-(defcustom bs-cache-directory (bs-xdg-dir cache)
+;;;###autoload
+(defcustom bs-cache-directory (expand-file-name "~/.cache/emacs/")
   "Directory beneath which additional volatile files are placed."
   :group 'bs
   :type 'directory)
 
-(defcustom bs-config-directory (bs-xdg-dir config)
+;;;###autoload
+(defcustom bs-config-directory (expand-file-name "~/.config/emacs/")
   "Directory beneath which additional config files are placed."
   :type 'directory
   :group 'bs)
 
-(defcustom bs-data-directory (bs-xdg-dir data)
+;;;###autoload
+(defcustom bs-data-directory (expand-file-name "~/.local/share/emacs/")
   "Directory beneath which additional non-volatile files are placed."
   :group 'bs
   :type 'directory)
 
-(defcustom bs-state-directory (bs-xdg-dir state)
+;;;###autoload
+(defcustom bs-state-directory (expand-file-name "~/.local/state/emacs/")
   "Directory beneath which additional state files are placed."
   :group 'bs
   :type 'directory)
