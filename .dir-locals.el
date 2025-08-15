@@ -4,4 +4,5 @@
 ((nil . ((fill-column . 79)
          (indent-tabs-mode . nil)
          (sentence-end-double-space . t)
-         (tab-width   .  8))))
+         (tab-width . 8)))
+ ("\"/COMMIT_EDITMSG\\\\'\"" . ((fill-column . 79))))
