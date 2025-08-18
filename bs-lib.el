@@ -31,6 +31,121 @@
 
 (require 'cl-lib)
 
+(defun bs--advice-name (target &optional name)
+  "Intern a readable, unique advice symbol like TARGET@NAME."
+  (or name (setq name (gensym "bs-fn-")))
+  (let* ((target-name (if (symbolp target)
+                          (symbol-name target)
+                        (format "%s" target)))
+         (full-name  (format "%s@%s" target-name name)))
+    (intern full-name)))
+
+
+(defconst bs--advice-hows '(:after
+                            :after-until
+                            :after-while
+                            :around
+                            :before
+                            :before-until
+                            :before-while
+                            :filter-args
+                            :filter-return
+                            :override)
+  "HOW keywords for `bs-add-advice' and `bs-add-advice*'.")
+
+(defun bs--advice-list-how-form (plist)
+  "Construct the list of (HOW . FORM) from PLIST.
+
+FORM must be a function symbol or a lambda function follow the arguments
+requirement of HOW."
+  (let (result)
+    (while plist
+      (let ((how (pop plist))
+            (form (pop plist)))
+        (unless (memq how bs--advice-hows)
+          (error "Unknown advice how: %S" k))
+        (cond
+         ((and (consp form)
+               (eq (car form) 'function)
+               (symbolp (cadr form)))
+          (push (cons how (cadr spec)) result))
+         ((and (symbolp form)
+               (fboundp form))
+          (push (cons how form) result))
+         ((and (consp form)
+               (eq (car form) 'lambda))
+          (push (cons how form) result))
+         (t
+          (error "FORM must be a function or lambda function, got: %S"
+                 form)))))
+    (nreverse result)))
+
+;;;###autoload
+(defmacro bs-add-advice (target &rest how-form-list)
+  "Add multiple advices (HOW-FORM-LIST) to TARGET.
+
+HOW-FORM-LIST must be [:HOW FUNCTION-NAME] or [:HOW LAMBDA-EXPR]."
+  (declare (indent defun))
+  (let* ((parsed-list (bs--advice-list-how-form how-form-list))
+         (advices
+          (mapcar
+           (lambda (how-form)
+             (let* ((how (car how-form))
+                    (form (cdr how-form))
+                    (lambdap (and (consp form)
+                                  (eq (car form) 'lambda)))
+                    (name (symbol-name (gensym "bs-fn-")))
+                    (sym (if lambdap
+                             (bs--advice-name target name)
+                           form)))
+               (if lambdap
+                   `(progn
+                      (defun ,sym ,(cadr form) ,@(cddr form))
+                      (advice-add ',target ,how #',sym))
+                 `(advice-add ',target ,how #',sym))))
+           parsed-list)))
+    `(progn ,@advices)))
+
+;;;###autoload
+(defmacro bs-add-advice* (target &rest how-form-list)
+  "Add multiple single-use advices (HOW-FORM-LIST) to TARGET.
+
+HOW-FORM-LIST must be [:HOW FUNCTION-NAME] or [:HOW LAMBDA-EXPR]."
+  (declare (indent defun))
+  (let* ((parsed-list (bs--advice-list-how-form how-form-list))
+         (advices
+          (mapcar
+           (lambda (how-form)
+             (let* ((how (car how-form))
+                    (form (cdr how-form))
+                    (lambdap (and (consp form)
+                                  (eq (car form) 'lambda)))
+                    (name (symbol-name (gensym "bs-fn-")))
+                    (sym (bs--advice-name target name))
+                    (callee (if lambdap
+                                (let* ((sym (gensym "bs-fn-"))
+                                       (name (symbol-name sym)))
+                                  (bs--advice-name target name))
+                              form)))
+               `(progn
+                  ,(when lambdap
+                     `(defun ,callee ,(cadr form) ,@(cddr form)))
+                  (defun ,sym ,(pcase how
+                                 (:around '(orig-fn &rest args))
+                                 (:filter-args '(args))
+                                 (:filter-return '(ret))
+                                 (_ '(&rest args)))
+                    (unwind-protect
+                        ,(pcase how
+                           (:around `(apply #',callee orig-fn args))
+                           (:filter-args `(funcall #',callee args))
+                           (:filter-return `(funcall #',callee ret))
+                           (_ `(apply #',callee args)))
+                      (advice-remove ',target ',sym)))
+                  (advice-add ',target ,how #',sym))))
+           parsed-list)))
+    `(progn ,@advices)))
+
 (defun bs--genfn (sexp &optional prefix)
   "Convert SEXP into a function symbol.
 
