@@ -63,12 +63,12 @@ requirement of HOW."
       (let ((how (pop plist))
             (form (pop plist)))
         (unless (memq how bs--advice-hows)
-          (error "Unknown advice how: %S" k))
+          (error "Unknown advice how: %S" how))
         (cond
          ((and (consp form)
                (eq (car form) 'function)
                (symbolp (cadr form)))
-          (push (cons how (cadr spec)) result))
+          (push (cons how (cadr form)) result))
          ((and (symbolp form)
                (fboundp form))
           (push (cons how form) result))
@@ -146,68 +146,86 @@ HOW-FORM-LIST must be [:HOW FUNCTION-NAME] or [:HOW LAMBDA-EXPR]."
            parsed-list)))
     `(progn ,@advices)))
 
-(defun bs--genfn (sexp &optional prefix)
-  "Convert SEXP into a function symbol.
-
-The symbol name of function will use PREFIX, default to bs-fn-."
-  (or prefix (setq prefix "bs-fn-"))
-  (cond
-   ((and (symbolp sexp)
-         (fboundp sexp))
-    sexp)
-   ((and (eq (car-safe sexp) 'function)
-         (symbolp (cadr sexp)))
-    (cadr sexp))
-   ((and (consp sexp)
-         (eq (car sexp) 'lambda))
-    (let ((sym (intern (format "%s" (gensym prefix)))))
-      (fset sym (byte-compile sexp))))
-   (t
-    (let ((sym (intern (format "%s" (gensym prefix))))
-          (fn (lambda (&rest args)
-                (ignore args)
-                (eval sexp))))
-      (fset sym (byte-compile fn))
-      sym))))
-
 ;;;###autoload
-(defmacro bs-add-hook (hook &rest rest)
-  "Add functions in REST to HOOK.
+(defmacro bs-add-hook (hook &rest body)
+  "Add functions in BODY to HOOK.
 
-REST may contain function symbols, lambda functions and keywords that
+BODY may contain function symbols, lambda functions and keywords that
 describe how to `add-hook'.
 
 Keywords can be :append and :local, with their values corresponding to
 the APPEND and LOCAL parameters in the function `add-hook'."
   (declare (indent defun))
-  (let* ((append (plist-get rest :append))
-         (local (plist-get rest :local))
-         (sexps (cl-loop for x
-                         in rest
-                         unless (keywordp x)
-                         collect x)))
-    `(dolist (sexp ',sexps)
-       (add-hook ',hook (bs--genfn sexp) ,append ,local))))
+  (let ((append-depth nil)
+        (localp nil)
+        (sexp-forms '()))
+    (while body
+      (let ((cus (pop body)))
+        (pcase cus
+          (:append
+           (setq append-depth (pop body)))
+          (:local
+           (setq localp (pop body)))
+          (_
+           (push cus sexp-forms)))))
+    (setq sexp-forms (nreverse sexp-forms))
+    `(progn
+       ,@(mapcar
+          (lambda (sexp)
+            (cond
+             ((and (symbolp sexp)
+                   (not (keywordp sexp)))
+              `(add-hook ',hook ',sexp ,append-depth ,localp))
+             ((and (consp sexp)
+                   (eq (car sexp) 'lambda))
+              `(let ((fn ,sexp))
+                 (add-hook ',hook fn ,append-depth ,localp)))
+             (t
+              `(let ((fn (lambda () ,sexp)))
+                 (add-hook ',hook fn ,append-depth ,localp)))))
+          sexp-forms))))
 
 ;;;###autoload
-(defmacro bs-add-hook* (hook &rest rest)
-  "Add single-use functions in REST to HOOK.
+(defmacro bs-add-hook* (hook &rest body)
+  "Add single-use functions in BODY to HOOK.
 See `bs-add-hook'."
   (declare (indent defun))
-  (let* ((append (plist-get rest :append))
-         (local  (plist-get rest :local))
-         (sexps  (cl-loop for x
-                          in rest
-                          unless (keywordp x)
-                          collect x)))
-    `(dolist (sexp ',sexps)
-       (let* ((fn (bs--genfn sexp))
-              (h (intern (format "%s" (gensym "bs-fn-")))))
-         (fset h
-               (lambda ()
-                 (funcall fn)
-                 (remove-hook ',hook h ,local)))
-         (add-hook ',hook h ,append ,local)))))
+  (let ((append-depth nil)
+        (localp nil)
+        (sexp-forms '()))
+    (while body
+      (let ((cus (pop body)))
+        (pcase cus
+          (:append
+           (setq append-depth (pop body)))
+          (:local
+           (setq localp (pop body)))
+          (_
+           (push cus sexp-forms)))))
+    (setq sexp-forms (nreverse sexp-forms))
+    `(progn
+       ,@(mapcar
+          (lambda (sexp)
+            (let ((call-form
+                   (cond
+                    ((and (symbolp sexp)
+                          (not (keywordp sexp)))
+                     `(apply #',sexp args))
+                    ((and (consp sexp)
+                          (eq (car sexp) 'lambda))
+                     `(apply ,sexp args))
+                    (t
+                     `(progn
+                        (ignore args)
+                        ,sexp)))))
+              `(let (self)
+                 (setq self
+                       (lambda (&rest args)
+                         (unwind-protect
+                             ,call-form
+                           (remove-hook ',hook self ,localp))))
+                 (add-hook ',hook self ,append-depth ,localp))))
+          sexp-forms))))
 
 ;;;###autoload
 (defun bs-path (&rest segments)
