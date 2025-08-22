@@ -249,6 +249,30 @@ See `bs-add-hook'."
     (make-directory dir 'parents)
     path))
 
+;;;###autoload
+(defmacro bs-setq (&rest sym-val-list)
+  "Use proper setter for SYM-VAL-LIST.
+
+SYM-VAL-LIST is a list like the argument of `setq', e.g. [SYM VAL]....
+
+The symbols SYM are variables; they are literal (not evaluated).
+The values VAL are expressions; they are evaluated.
+
+If SYM has property `custom-set', get its customized property.
+Otherwise, use `set-default'."
+  (declare (indent nil))
+  (let ((args sym-val-list) form)
+    (while args
+      (let ((sym (pop args))
+            (val (pop args)))
+        (push
+         `(progn
+            (custom-load-symbol ',sym)
+            (funcall (or (get ',sym 'custom-set) 'set-default)
+                     ',sym ,val))
+         form)))
+    `(progn ,@(nreverse form))))
+
 (defun bs-silencing-message (func &rest args)
   "Silencing any message of FUNC, around with ARGS."
   (cl-letf (((symbol-function #'message) #'ignore))
