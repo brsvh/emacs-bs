@@ -114,8 +114,7 @@ function does not specify a special indentation."
 
 ;;;###autoload
 (eval-after-load 'lisp-mode
-  '(advice-add 'lisp-indent-function
-               :override 'bs-lisp-indent-function))
+  '(advice-add 'lisp-indent-function :override #'bs-lisp-indent-function))
 
 (provide 'bs-lisp-mode)
 ;;; bs-lisp-mode.el ends here
