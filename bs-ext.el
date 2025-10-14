@@ -38,7 +38,6 @@
   :prefix "bs-"
   :group 'emacs)
 
-;;;###autoload
 (defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
                                                   "~/.cache")
                                        "emacs/")
@@ -46,7 +45,6 @@
   :type 'directory
   :group 'bs)
 
-;;;###autoload
 (defcustom bs-config-directory (bs-path (bs-getenv "XDG_CONFIG_HOME"
                                                    "~/.config")
                                         "emacs/")
@@ -54,7 +52,6 @@
   :type 'directory
   :group 'bs)
 
-;;;###autoload
 (defcustom bs-data-directory (bs-path (bs-getenv "XDG_DATA_HOME"
                                                  "~/.local/share")
                                       "emacs/")
@@ -62,7 +59,6 @@
   :type 'directory
   :group 'bs)
 
-;;;###autoload
 (defcustom bs-state-directory (bs-path (bs-getenv "XDG_STATE_HOME"
                                                   "~/.local/state")
                                        "emacs/")
