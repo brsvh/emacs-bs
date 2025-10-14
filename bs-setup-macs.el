@@ -56,7 +56,7 @@ See `advice-add' for more details."
 (setup-define :after
   (lambda (features &rest body)
     (let ((features (if (listp features)
-                        (bs--setup-macs-maybe-unquote features)
+                        (bs-setup-macs-maybe-unquote features)
                       (list features)))
           (form (macroexp-progn body)))
       (dolist (feature (nreverse features))
@@ -70,8 +70,8 @@ See `advice-add' for more details."
   (lambda (condition action-and-flags)
     `(:option
       (append display-buffer-alist)
-      '(,(setup-macs-maybe-unquote condition)
-        ,@(setup-macs-maybe-unquote action-and-flags))))
+      '(,(bs-setup-macs-maybe-unquote condition)
+        ,@(bs-setup-macs-maybe-unquote action-and-flags))))
   :debug '(sexp [&rest sexp])
   :documentation "Create a CONDITION and ACTION-AND-FLAGS display rule."
   :repeatable t)
