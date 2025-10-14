@@ -109,5 +109,5 @@ The BUFFER must be saved in a file."
     (with-current-buffer (get-buffer buffer)
       (untabify (point-min) (point-max)))))
 
-(provide 'bs)
+(provide 'bs-ext)
 ;;; bs-ext.el ends here

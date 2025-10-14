@@ -253,5 +253,6 @@ See `advice-remove' for more details."
   :indent 1)
 
 )
-(provide 'setup-macs)
+
+(provide 'bs-setup-macs)
 ;;; bs-setup-macs.el ends here
