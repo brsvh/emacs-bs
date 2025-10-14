@@ -1,4 +1,4 @@
-;;; bs.el --- Personal Extensions -*- lexical-binding: t; -*-
+;;; bs-ext.el --- Personal Extension -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2022-2025 Bingshan Chang
 
@@ -24,7 +24,7 @@
 
 ;;; Commentary:
 
-;; These are extensions that provide additional features to support my
+;; This is extension that provide additional features to support my
 ;; personal Emacs configuration.
 
 ;;; Code:
@@ -34,41 +34,41 @@
 (require 'tabify)
 
 (defgroup bs nil
-  "Customize Bingshan's Emacs Configuration."
+  "Customize Bingshan's Emacs extension."
   :prefix "bs-"
   :group 'emacs)
 
 ;;;###autoload
-(defcustom bs-cache-directory (expand-file-name "~/.cache/emacs/")
+(defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
+                                                  "~/.cache")
+                                       "emacs/")
   "Directory beneath which additional volatile files are placed."
-  :group 'bs
-  :type 'directory)
+  :type 'directory
+  :group 'bs)
 
 ;;;###autoload
-(defcustom bs-config-directory (expand-file-name "~/.config/emacs/")
+(defcustom bs-config-directory (bs-path (bs-getenv "XDG_CONFIG_HOME"
+                                                   "~/.config")
+                                        "emacs/")
   "Directory beneath which additional config files are placed."
   :type 'directory
   :group 'bs)
 
 ;;;###autoload
-(defcustom bs-data-directory (expand-file-name "~/.local/share/emacs/")
+(defcustom bs-data-directory (bs-path (bs-getenv "XDG_DATA_HOME"
+                                                 "~/.local/share")
+                                      "emacs/")
   "Directory beneath which additional non-volatile files are placed."
-  :group 'bs
-  :type 'directory)
+  :type 'directory
+  :group 'bs)
 
 ;;;###autoload
-(defcustom bs-state-directory (expand-file-name "~/.local/state/emacs/")
+(defcustom bs-state-directory (bs-path (bs-getenv "XDG_STATE_HOME"
+                                                  "~/.local/state")
+                                       "emacs/")
   "Directory beneath which additional state files are placed."
-  :group 'bs
-  :type 'directory)
-
-;;;###autoload
-(defun bs/server-start ()
-  "Allow this Emacs process to be a server for client processes."
-  (interactive)
-  (eval-and-compile
-    (require 'server))
-  (unless (server-running-p) (server-start)))
+  :type 'directory
+  :group 'bs)
 
 ;;;###autoload
 (defun bs/delete-trailing-whitespace (&optional buffer)
@@ -77,14 +77,6 @@
   (let ((buffer (or buffer (current-buffer))))
     (with-current-buffer (get-buffer buffer)
       (delete-trailing-whitespace (point-min) (point-max)))))
-
-;;;###autoload
-(defun bs/untabify (&optional buffer)
-  "Do `untabify' in BUFFER."
-  (interactive "bBuffer: ")
-  (let ((buffer (or buffer (current-buffer))))
-    (with-current-buffer (get-buffer buffer)
-      (untabify (point-min) (point-max)))))
 
 ;;;###autoload
 (defun bs/guess-buffer-major-mode (&optional buffer)
@@ -106,5 +98,20 @@ The BUFFER must be saved in a file."
       (and (buffer-file-name (get-buffer buffer))
            (bs/guess-buffer-major-mode buffer)))))
 
+;;;###autoload
+(defun bs/server-start ()
+  "Allow this Emacs process to be a server for client processes."
+  (interactive)
+  (eval-and-compile (require 'server))
+  (unless (server-running-p) (server-start)))
+
+;;;###autoload
+(defun bs/untabify (&optional buffer)
+  "Do `untabify' in BUFFER."
+  (interactive "bBuffer: ")
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer (get-buffer buffer)
+      (untabify (point-min) (point-max)))))
+
 (provide 'bs)
-;;; bs.el ends here
+;;; bs-ext.el ends here

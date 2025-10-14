@@ -27,75 +27,78 @@
 ;; Just some custom hooks.
 
 ;; `bs-first-buffer-hook', `bs-first-file-hook', `bs-first-input-hook'
-;; and `bs-init-ui-hook' source code originates from `on', with the
+;; and `bs-first-ui-hook' source code originates from `on', with the
 ;; conceptual inspiration drawn from Doom Emacs.
 
 ;;; Code:
 
-;;
-;; Load time:
-;;
+(defvar bs-after-init-final-hook nil
+  "Normal hook run at the end of `after-init-hook'.")
 
 ;;;###autoload
-(eval-and-compile
-  (require 'bs-lib)
+(defun run-bs-after-init-final-hook (&rest _)
+  "Run `bs-after-init-final-hook'."
+  (run-hooks 'bs-after-init-final-hook))
 
-  (defvar bs-after-init-final-hook nil
-    "Normal hook run at the end of `after-init-hook'.")
+(defvar bs-first-buffer-hook nil
+  "Transient hooks run before the first opened buffer.")
 
-  (bs-add-hook after-init-hook :append 100
-    (run-hooks 'bs-after-init-final-hook))
+;;;###autoload
+(defun run-bs-first-buffer-hook (&rest _)
+  "Run `bs-first-buffer-hook'."
+  (run-hooks 'bs-first-buffer-hook)
+  (advice-remove 'after-find-file 'run-bs-first-buffer-hook)
+  (remove-hook 'window-buffer-change-functions 'run-bs-first-buffer-hook)
+  (remove-hook 'server-visit-hook 'run-bs-first-buffer-hook))
 
-  (defvar bs-first-buffer-hook nil
-    "Transient hooks run before the first opened buffer.")
+(defvar bs-first-file-hook nil
+  "Transient hooks run before the first opened file.")
 
-  (defun bs-first-buffer-helper (&rest _)
-    "Helper for run `bs-first-buffer-hook'."
-    (run-hooks 'bs-first-buffer-hook)
-    (advice-remove 'after-find-file 'bs-first-buffer-helper)
-    (remove-hook 'window-buffer-change-functions
-                 'bs-first-buffer-helper)
-    (remove-hook 'server-visit-hook 'bs-first-buffer-helper))
+;;;###autoload
+(defun run-bs-first-file-hook (&rest _)
+  "Run `bs-first-file-hook'."
+  (run-hooks 'bs-first-file-hook)
+  (advice-remove 'after-find-file 'run-bs-first-file-hook)
+  (remove-hook 'dired-initial-position-hook 'run-bs-first-file-hook))
 
-  (defvar bs-first-file-hook nil
-    "Transient hooks run before the first opened file.")
+(defvar bs-first-input-hook nil
+  "Transient hooks run before the first user input.")
 
-  (defun bs-first-file-helper (&rest _)
-    "Helper for run `bs-first-file-hook'."
-    (run-hooks 'bs-first-file-hook)
-    (advice-remove 'after-find-file 'bs-first-file-helper)
-    (remove-hook 'dired-initial-position-hook 'bs-first-file-helper))
+;;;###autoload
+(defun run-bs-first-input-hook (&rest _)
+  "Run `bs-first-input-hook'."
+  (run-hooks 'bs-first-input-hook)
+  (remove-hook 'pre-command-hook 'run-bs-first-input-hook))
 
-  (defvar bs-first-input-hook nil
-    "Transient hooks run before the first user input.")
+(defvar bs-first-ui-hook nil
+  "Transient hooks when the UI has been initialized.")
 
-  (defun bs-first-input-helper (&rest _)
-    "Helper for run `bs-first-input-hook'."
-    (run-hooks 'bs-first-input-hook)
-    (remove-hook 'pre-command-hook 'bs-first-input-helper))
+;;;###autoload
+(defun run-bs-first-ui-hook (&rest _)
+  "Run `bs-first-ui-hook'."
+  (run-hooks 'bs-first-ui-hook)
+  (remove-hook 'server-after-make-frame-hook 'run-bs-first-ui-hook)
+  (remove-hook 'after-init-hook 'run-bs-first-ui-hook))
 
-  (defvar bs-init-ui-hook nil
-    "Transient hooks when the UI has been initialized.")
-
-  (defun bs-init-ui-helper (&rest _)
-    "Helper for run `bs-init-ui-hook'."
-    (run-hooks 'bs-init-ui-hook)
-    (remove-hook 'server-after-make-frame-hook #'bs-init-ui-helper)
-    (remove-hook 'after-init-hook #'bs-init-ui-helper))
+;;;###autoload
+(progn
+  (add-hook 'after-init-hook 'run-bs-after-init-final-hook 100)
 
   (if (daemonp)
-      (bs-add-hook server-after-make-frame-hook bs-init-ui-helper)
-    (bs-add-hook after-init-hook bs-init-ui-helper))
+      (add-hook 'server-after-make-frame-hook 'run-bs-first-ui-hook)
+    (add-hook 'after-init-hook 'run-bs-first-ui-hook))
 
-  (bs-add-hook window-setup-hook :append -100
-    (bs-add-advice after-find-file
-      :before bs-first-buffer-helper
-      :before bs-first-file-helper)
-    (bs-add-hook window-buffer-change-functions bs-first-buffer-helper)
-    (bs-add-hook dired-initial-position-hook bs-first-file-helper)
-    (bs-add-hook pre-command-hook bs-first-input-helper))
+  (add-hook 'window-setup-hook
+            #'(lambda ()
+                (advice-add 'after-find-file :before #'run-bs-first-buffer-hook)
+                (advice-add 'after-find-file :before #'run-bs-first-file-hook)
 
-  (bs-add-hook server-visit-hook bs-first-buffer-helper))
+                (add-hook 'window-buffer-change-functions 'run-bs-first-buffer-hook)
+                (add-hook 'dired-initial-position-hook 'run-bs-first-file-hook)
+                (add-hook 'pre-command-hook 'run-bs-first-input-hook))
+            -100)
+
+  (add-hook 'server-visit-hook 'run-bs-first-buffer-hook))
 
 (provide 'bs-hooks)
 ;;; bs-hooks.el ends here
