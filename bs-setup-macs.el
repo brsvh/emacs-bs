@@ -68,14 +68,7 @@ See `advice-add' for more details."
 
 (setup-define :autoload
   (lambda (func)
-    (let ((fn (if (memq (car-safe func) '(quote function))
-                  (cadr func)
-                func)))
-      `(unless (fboundp (quote ,fn))
-         (autoload (function ,fn)
-           ,(symbol-name (setup-get 'feature))
-           nil
-           t))))
+    `(autoload ',func ,(symbol-name (setup-get 'feature))))
   :documentation "Autoload FUNC if not already bound."
   :repeatable t
   :signature '(FUNC ...))
