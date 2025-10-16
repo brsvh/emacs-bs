@@ -66,6 +66,20 @@ See `advice-add' for more details."
   :documentation "Load the current feature after FEATURES."
   :indent 1)
 
+(setup-define :autoload
+  (lambda (func)
+    (let ((fn (if (memq (car-safe func) '(quote function))
+                  (cadr func)
+                func)))
+      `(unless (fboundp (quote ,fn))
+         (autoload (function ,fn)
+           ,(symbol-name (setup-get 'feature))
+           nil
+           t))))
+  :documentation "Autoload FUNC if not already bound."
+  :repeatable t
+  :signature '(FUNC ...))
+
 (setup-define :buffer-match
   (lambda (condition action-and-flags)
     `(:option
