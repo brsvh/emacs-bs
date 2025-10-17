@@ -28,7 +28,12 @@
 
 ;; `bs-first-buffer-hook', `bs-first-file-hook', `bs-first-input-hook'
 ;; and `bs-first-ui-hook' source code originates from `on', with the
-;; conceptual inspiration drawn from Doom Emacs.
+;; conceptual inspiration drawn from Doom Emacs.  They support
+;; executing its functions when a buffer, file, or input is operated
+;; on for the first time.
+
+;; `bs-after-startup-early-hook' and `bs-after-startup-late-hook'
+;; support executing its functions after delay.
 
 ;;; Code:
 
@@ -39,6 +44,22 @@
 (defun run-bs-after-init-final-hook (&rest _)
   "Run `bs-after-init-final-hook'."
   (run-hooks 'bs-after-init-final-hook))
+
+(defvar bs-after-startup-early-hook nil
+  "Hook run about 1s after Emacs startup is complete.")
+
+;;;###autoload
+(defun run-bs-after-startup-early-hook (&rest _)
+  "Run `bs-after-startup-early-hook'."
+  (run-with-idle-timer 1.0 nil #'run-hooks 'bs-after-startup-early-hook))
+
+(defvar bs-after-startup-late-hook nil
+  "Hook run about 5s after Emacs startup is complete.")
+
+;;;###autoload
+(defun run-bs-after-startup-late-hook (&rest _)
+  "Run `bs-after-startup-late-hook'."
+  (run-with-idle-timer 5.0 nil #'run-hooks 'bs-after-startup-late-hook))
 
 (defvar bs-first-buffer-hook nil
   "Transient hooks run before the first opened buffer.")
@@ -83,6 +104,9 @@
 ;;;###autoload
 (progn
   (add-hook 'after-init-hook 'run-bs-after-init-final-hook 100)
+
+  (add-hook 'emacs-startup-hook 'run-bs-after-startup-early-hook 99)
+  (add-hook 'emacs-startup-hook 'run-bs-after-startup-late-hook 100)
 
   (if (daemonp)
       (add-hook 'server-after-make-frame-hook 'run-bs-first-ui-hook)

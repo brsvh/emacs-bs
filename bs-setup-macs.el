@@ -70,6 +70,7 @@ See `advice-add' for more details."
   (lambda (func)
     `(autoload ',func ,(symbol-name (setup-get 'feature))))
   :documentation "Autoload FUNC if not already bound."
+  :indent 1
   :repeatable t
   :signature '(FUNC ...))
 
