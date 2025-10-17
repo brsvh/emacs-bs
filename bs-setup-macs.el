@@ -66,6 +66,22 @@ See `advice-add' for more details."
   :documentation "Load the current feature after FEATURES."
   :indent 1)
 
+(setup-define :after-startup-early
+  (lambda (func)
+    `(add-hook 'bs-after-startup-early-hook ,func))
+  :debug '(sexp)
+  :documentation "Add FUNC to `bs-after-startup-early-hook'."
+  :ensure '(func)
+  :repeatable t)
+
+(setup-define :after-startup-late
+  (lambda (func)
+    `(add-hook 'bs-after-startup-early-hook ,func))
+  :debug '(sexp)
+  :documentation "Add FUNC to `bs-after-startup-late-hook'."
+  :ensure '(func)
+  :repeatable t)
+
 (setup-define :autoload
   (lambda (func)
     `(autoload ',func ,(symbol-name (setup-get 'feature))))
