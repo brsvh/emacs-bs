@@ -42,8 +42,18 @@
       (cadr form)
     form))
 
-;; See https://www.emacswiki.org/emacs/SetupEl#h5o-13
 (setup-define :add-advice
+  (lambda (where function)
+    `(advice-add ',(setup-get 'func) ,where ,function))
+  :after-loaded t
+  :debug '(sexp function-form)
+  :documentation "Add a piece of advice on a function.
+See `advice-add' for more details."
+  :ensure '(nil func)
+  :repeatable t)
+
+;; See https://www.emacswiki.org/emacs/SetupEl#h5o-13
+(setup-define :add-advice*
   (lambda (symbol where function)
     `(advice-add ',symbol ,where ,function))
   :after-loaded t
@@ -242,6 +252,16 @@ See `advice-add' for more details."
   :repeatable nil)
 
 (setup-define :remove-advice
+  (lambda (function)
+    `(advice-remove ',(setup-get 'func) ,function))
+  :after-loaded t
+  :debug '(sexp)
+  :documentation "Remove a piece of advice on a function.
+See `advice-remove' for more details."
+  :ensure '(func)
+  :repeatable t)
+
+(setup-define :remove-advice*
   (lambda (symbol function)
     `(advice-remove ',symbol ,function))
   :after-loaded t
