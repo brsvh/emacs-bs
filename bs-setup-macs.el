@@ -132,7 +132,8 @@ See `advice-add' for more details."
 (setup-define :file-match
   (lambda (glob)
     `(add-to-list 'auto-mode-alist
-                  (cons ,(wildcard-to-regexp pat) ',(setup-get 'mode))))
+                  (cons ,(wildcard-to-regexp glob)
+                        ',(setup-get 'mode))))
   :documentation "Associate the current mode with files that match GLOB."
   :debug '(form)
   :repeatable t)
@@ -217,7 +218,7 @@ See `advice-add' for more details."
   :documentation "Process KEY, MAP, COMMAND binding of ARGS.")
 
 (setup-define :keymap-unset
-  (lambda (key command)
+  (lambda (key)
     `(keymap-unset ,(setup-get 'map) ,key))
   :debug '(stringp)
   :documentation "Unset KEY in current map."
@@ -225,9 +226,9 @@ See `advice-add' for more details."
   :repeatable t)
 
 (setup-define :keymap-unset*
-  (lambda (key command)
+  (lambda (key)
     `(keymap-unset ,(setup-get 'map) ,key t))
-  :debug '(stringp sexp)
+  :debug '(stringp)
   :documentation "Remove KEY in current map."
   :ensure '(nil)
   :repeatable t)
