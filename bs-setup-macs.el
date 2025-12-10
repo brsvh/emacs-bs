@@ -272,6 +272,82 @@ See `advice-remove' for more details."
   :ensure '(nil func)
   :repeatable t)
 
+(setup-define :set
+  (setup-make-setter
+   (lambda (name)
+     `(funcall #'symbol-value ',name))
+   (lambda (name value)
+     `(funcall #'set ',name ,value)))
+  :documentation "Set the symbol NAME to VALUE.
+NAME may be a symbol, or a cons-cell.  If NAME is a cons-cell, it
+will use the car value to modify the behaviour.  These forms are
+supported:
+
+(append VAR)    Assuming VAR designates a list, add VAL as its last
+                element, unless it is already member of the list.
+
+(prepend VAR)   Assuming VAR designates a list, add VAL to the
+                beginning, unless it is already member of the
+                list.
+
+(remove VAR)    Assuming VAR designates a list, remove all instances
+                of VAL.
+
+(append* VAR)  Assuming VAR designates a list, add each element
+               of VAL to the end of VAR, keeping their order,
+               unless it is already a member of the list.
+
+(prepend* VAR) Assuming VAR designates a list, add each element
+               of VAL to the start of VAR, keeping their order,
+               unless it is already a member of the list.
+
+(remove* VAR)  Assuming VAR designates a list, remove all
+               instances of each element of VAL.
+
+Note that if the value of an option is modified partially by
+append, prepend, remove, one should ensure that its value
+has been loaded."
+  :debug '(sexp form)
+  :repeatable t)
+
+(setup-define :set-default
+  (setup-make-setter
+   (lambda (name)
+     `(funcall #'symbol-value ',name))
+   (lambda (name value)
+     `(funcall #'set-default ',name ,value)))
+  :documentation "Set the defalut value of symbol NAME to VALUE.
+NAME may be a symbol, or a cons-cell.  If NAME is a cons-cell, it
+will use the car value to modify the behaviour.  These forms are
+supported:
+
+(append VAR)    Assuming VAR designates a list, add VAL as its last
+                element, unless it is already member of the list.
+
+(prepend VAR)   Assuming VAR designates a list, add VAL to the
+                beginning, unless it is already member of the
+                list.
+
+(remove VAR)    Assuming VAR designates a list, remove all instances
+                of VAL.
+
+(append* VAR)  Assuming VAR designates a list, add each element
+               of VAL to the end of VAR, keeping their order,
+               unless it is already a member of the list.
+
+(prepend* VAR) Assuming VAR designates a list, add each element
+               of VAL to the start of VAR, keeping their order,
+               unless it is already a member of the list.
+
+(remove* VAR)  Assuming VAR designates a list, remove all
+               instances of each element of VAL.
+
+Note that if the value of an option is modified partially by
+append, prepend, remove, one should ensure that its value
+has been loaded."
+  :debug '(sexp form)
+  :repeatable t)
+
 ;; See https://www.emacswiki.org/emacs/SetupEl#h5o-12
 (setup-define :unhook
   (lambda (func)
