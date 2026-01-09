@@ -68,18 +68,19 @@
 (defvar ctl-c-w-map (make-keymap)
   "Keymap for subcommands of \\`C-c w'.")
 
-(defvar ctl-c-map
-  (let ((map (make-keymap)))
-    (keymap-set map "4" ctl-c-a-map)
-    (keymap-set map "5" ctl-c-5-map)
-    (keymap-set map "a" ctl-c-a-map)
-    (keymap-set map "f" ctl-c-f-map)
-    (keymap-set map "n" ctl-c-n-map)
-    (keymap-set map "p" ctl-c-p-map)
-    (keymap-set map "s" ctl-c-s-map)
-    (keymap-set map "v" ctl-c-w-map)
-    (keymap-set map "<home>" ctl-c-home-map))
+(defvar ctl-c-map (make-keymap)
   "Default Keymap for \\`C-c' commands.")
+
+(keymap-set global-map "C-c" ctl-c-map)
+(keymap-set ctl-c-map "4" ctl-c-a-map)
+(keymap-set ctl-c-map "5" ctl-c-5-map)
+(keymap-set ctl-c-map "a" ctl-c-a-map)
+(keymap-set ctl-c-map "f" ctl-c-f-map)
+(keymap-set ctl-c-map "n" ctl-c-n-map)
+(keymap-set ctl-c-map "p" ctl-c-p-map)
+(keymap-set ctl-c-map "s" ctl-c-s-map)
+(keymap-set ctl-c-map "v" ctl-c-w-map)
+(keymap-set ctl-c-map "<home>" ctl-c-home-map)
 
 (defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
                                                   "~/.cache")
