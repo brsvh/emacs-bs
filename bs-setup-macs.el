@@ -84,6 +84,11 @@ See `advice-add' for more details."
   :ensure '(func)
   :repeatable t)
 
+(setup-define :after-startup-early-into
+  (lambda ()
+    `(add-hook 'bs-after-startup-early-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-after-startup-early-hook'.")
+
 (setup-define :after-startup-late
   (lambda (func)
     `(add-hook 'bs-after-startup-early-hook ,func))
@@ -91,6 +96,11 @@ See `advice-add' for more details."
   :documentation "Add FUNC to `bs-after-startup-late-hook'."
   :ensure '(func)
   :repeatable t)
+
+(setup-define :after-startup-late-into
+  (lambda ()
+    `(add-hook 'bs-after-startup-late-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-after-startup-late-hook'.")
 
 (setup-define :autoload
   (lambda (func)
@@ -145,6 +155,11 @@ See `advice-add' for more details."
   :ensure '(func)
   :repeatable t)
 
+(setup-define :first-buffer-into
+  (lambda ()
+    `(add-hook 'bs-first-buffer-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-first-buffer-hook'.")
+
 (setup-define :first-file
   (lambda (func)
     `(add-hook 'bs-first-file-hook ,func))
@@ -152,6 +167,11 @@ See `advice-add' for more details."
   :documentation "Add FUNC to `bs-first-file-hook'."
   :ensure '(func)
   :repeatable t)
+
+(setup-define :first-file-into
+  (lambda ()
+    `(add-hook 'bs-first-file-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-first-file-hook'.")
 
 (setup-define :first-input
   (lambda (func)
@@ -161,6 +181,11 @@ See `advice-add' for more details."
   :ensure '(func)
   :repeatable t)
 
+(setup-define :first-input-into
+  (lambda ()
+    `(add-hook 'bs-first-input-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-first-input-hook'.")
+
 (setup-define :first-ui
   (lambda (func)
     `(add-hook 'bs-first-ui-hook ,func))
@@ -168,6 +193,11 @@ See `advice-add' for more details."
   :documentation "Add FUNC to `bs-first-ui-hook'."
   :ensure '(func)
   :repeatable t)
+
+(setup-define :first-ui-into
+  (lambda ()
+    `(add-hook 'bs-first-ui-hook #',(setup-get 'func)))
+  :documentation "Add current function to `bs-first-ui-hook'.")
 
 (setup-define :keymap-set
   (lambda (key command)
@@ -270,6 +300,12 @@ See `advice-remove' for more details."
 See `advice-remove' for more details."
   :ensure '(nil func)
   :repeatable t)
+
+(setup-define :require-this-when-compile
+  (lambda ()
+    `(eval-when-compile
+       (require ',(setup-get 'feature))))
+  :documentation "Require the context feature when byte-compile.")
 
 (setup-define :set
   (setup-make-setter
