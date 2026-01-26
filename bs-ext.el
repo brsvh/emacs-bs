@@ -47,6 +47,9 @@
 (defvar ctl-c-a-map (make-keymap)
   "Keymap for subcommands of \\`C-c a'.")
 
+(defvar ctl-c-c-map (make-keymap)
+  "Keymap for subcommands of \\`C-c c'.")
+
 (defvar ctl-c-f-map (make-keymap)
   "Keymap for subcommands of \\`C-c f'.")
 
@@ -75,6 +78,7 @@
 (keymap-set ctl-c-map "4" ctl-c-a-map)
 (keymap-set ctl-c-map "5" ctl-c-5-map)
 (keymap-set ctl-c-map "a" ctl-c-a-map)
+(keymap-set ctl-c-map "c" ctl-c-c-map)
 (keymap-set ctl-c-map "f" ctl-c-f-map)
 (keymap-set ctl-c-map "n" ctl-c-n-map)
 (keymap-set ctl-c-map "p" ctl-c-p-map)
