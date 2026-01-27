@@ -39,37 +39,37 @@
   :group 'emacs)
 
 (defvar ctl-c-4-map (make-keymap)
-  "Keymap for subcommands of \\`C-c 4'.")
+  "Keymap for sub-commands of \\`C-c 4'.")
 
 (defvar ctl-c-5-map (make-keymap)
-  "Keymap for subcommands of \\`C-c 5'.")
+  "Keymap for sub-commands of \\`C-c 5'.")
 
 (defvar ctl-c-a-map (make-keymap)
-  "Keymap for subcommands of \\`C-c a'.")
+  "Keymap for sub-commands of \\`C-c a'.")
 
 (defvar ctl-c-c-map (make-keymap)
-  "Keymap for subcommands of \\`C-c c'.")
+  "Keymap for sub-commands of \\`C-c c'.")
 
 (defvar ctl-c-f-map (make-keymap)
-  "Keymap for subcommands of \\`C-c f'.")
+  "Keymap for sub-commands of \\`C-c f'.")
 
 (defvar ctl-c-home-map (make-keymap)
-  "Keymap for subcommands of \\`C-c <home>'.")
+  "Keymap for sub-commands of \\`C-c <home>'.")
 
 (defvar ctl-c-n-map (make-keymap)
-  "Keymap for subcommands of \\`C-c n'.")
+  "Keymap for sub-commands of \\`C-c n'.")
 
 (defvar ctl-c-p-map (make-keymap)
-  "Keymap for subcommands of \\`C-c p'.")
+  "Keymap for sub-commands of \\`C-c p'.")
 
 (defvar ctl-c-s-map (make-keymap)
-  "Keymap for subcommands of \\`C-c s'.")
+  "Keymap for sub-commands of \\`C-c s'.")
 
 (defvar ctl-c-v-map (make-keymap)
-  "Keymap for subcommands of \\`C-c v'.")
+  "Keymap for sub-commands of \\`C-c v'.")
 
 (defvar ctl-c-w-map (make-keymap)
-  "Keymap for subcommands of \\`C-c w'.")
+  "Keymap for sub-commands of \\`C-c w'.")
 
 (defvar ctl-c-map (make-keymap)
   "Default Keymap for \\`C-c' commands.")
@@ -83,7 +83,8 @@
 (keymap-set ctl-c-map "n" ctl-c-n-map)
 (keymap-set ctl-c-map "p" ctl-c-p-map)
 (keymap-set ctl-c-map "s" ctl-c-s-map)
-(keymap-set ctl-c-map "v" ctl-c-w-map)
+(keymap-set ctl-c-map "v" ctl-c-v-map)
+(keymap-set ctl-c-map "w" ctl-c-w-map)
 (keymap-set ctl-c-map "<home>" ctl-c-home-map)
 
 (defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
