@@ -1,6 +1,6 @@
 ;;; bs-lisp-mode.el --- Customized Lisp mode's idiosyncratic commands  -*- lexical-binding:t -*-
 
-;; Copyright (C) 2022-2025 Bingshan Chang
+;; Copyright (C) 2022-2026 Bingshan Chang
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
