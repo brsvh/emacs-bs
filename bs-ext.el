@@ -74,19 +74,6 @@
 (defvar ctl-c-map (make-keymap)
   "Default Keymap for \\`C-c' commands.")
 
-(keymap-set global-map "C-c" ctl-c-map)
-(keymap-set ctl-c-map "4" ctl-c-a-map)
-(keymap-set ctl-c-map "5" ctl-c-5-map)
-(keymap-set ctl-c-map "a" ctl-c-a-map)
-(keymap-set ctl-c-map "c" ctl-c-c-map)
-(keymap-set ctl-c-map "f" ctl-c-f-map)
-(keymap-set ctl-c-map "n" ctl-c-n-map)
-(keymap-set ctl-c-map "p" ctl-c-p-map)
-(keymap-set ctl-c-map "s" ctl-c-s-map)
-(keymap-set ctl-c-map "v" ctl-c-v-map)
-(keymap-set ctl-c-map "w" ctl-c-w-map)
-(keymap-set ctl-c-map "<home>" ctl-c-home-map)
-
 (defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
                                                   "~/.cache")
                                        "emacs/")
@@ -114,6 +101,23 @@
   "Directory beneath which additional state files are placed."
   :type 'directory
   :group 'bs)
+
+(defun bs-copy-keymap-recursively (from to)
+  "Copy all bindings in keymap FROM into keymap TO recursively."
+  (map-keymap
+   (lambda (event binding)
+     (cond
+      ((null event) nil)
+      ((keymapp binding)
+       (let ((sub-to (lookup-key to (vector event))))
+         (unless (keymapp sub-to)
+           (setq sub-to (make-sparse-keymap))
+           (define-key to (vector event) sub-to))
+         (bs-copy-keymap-recursively binding sub-to)))
+      (t
+       (define-key to (vector event) binding))))
+   from)
+  to)
 
 ;;;###autoload
 (defun bs/delete-trailing-whitespace (&optional buffer)
@@ -157,6 +161,25 @@ The BUFFER must be saved in a file."
   (let ((buffer (or buffer (current-buffer))))
     (with-current-buffer (get-buffer buffer)
       (untabify (point-min) (point-max)))))
+
+;;;###autoload
+(progn
+  ;; Establish a structured \\`C-c' prefix hierarchy to group related
+  ;; commands under stable, mnemonic sub-maps. This keeps custom key
+  ;; bindings discoverable, avoids collisions, and scales as new
+  ;; command groups are added over time.
+  (keymap-set global-map "C-c"    ctl-c-map)
+  (keymap-set ctl-c-map  "4"      ctl-c-4-map)
+  (keymap-set ctl-c-map  "5"      ctl-c-5-map)
+  (keymap-set ctl-c-map  "a"      ctl-c-a-map)
+  (keymap-set ctl-c-map  "c"      ctl-c-c-map)
+  (keymap-set ctl-c-map  "f"      ctl-c-f-map)
+  (keymap-set ctl-c-map  "n"      ctl-c-n-map)
+  (keymap-set ctl-c-map  "p"      ctl-c-p-map)
+  (keymap-set ctl-c-map  "s"      ctl-c-s-map)
+  (keymap-set ctl-c-map  "v"      ctl-c-v-map)
+  (keymap-set ctl-c-map  "w"      ctl-c-w-map)
+  (keymap-set ctl-c-map  "<home>" ctl-c-home-map))
 
 (provide 'bs-ext)
 ;;; bs-ext.el ends here
