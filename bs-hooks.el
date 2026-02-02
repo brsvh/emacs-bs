@@ -37,6 +37,8 @@
 
 ;;; Code:
 
+(require 'project)
+
 (defvar bs-after-init-final-hook nil
   "Normal hook run at the end of `after-init-hook'.")
 
@@ -91,6 +93,22 @@
   (run-hooks 'bs-first-input-hook)
   (remove-hook 'pre-command-hook 'run-bs-first-input-hook))
 
+(defvar bs-first-project-hook nil
+  "Transient hooks when the project has been opened.")
+
+(defvar bs-first-project-p nil
+  "Return t if any project has been opened.")
+
+;;;###autoload
+(defun run-bs-first-project-hook (&rest _)
+  "Run `bs-first-project-hook'."
+  (when (and (not bs-first-project-p)
+             (project-current nil))
+    (setq bs-first-project-p t)
+    (remove-hook 'find-file-hook 'run-bs-first-project-hook)
+    (advice-remove 'project-switch-project 'run-bs-first-project-hook)
+    (run-hooks 'bs-first-project-hook)))
+
 (defvar bs-first-ui-hook nil
   "Transient hooks when the UI has been initialized.")
 
@@ -114,12 +132,14 @@
 
   (add-hook 'window-setup-hook
             #'(lambda ()
-                (advice-add 'after-find-file :before #'run-bs-first-buffer-hook)
-                (advice-add 'after-find-file :before #'run-bs-first-file-hook)
+                (advice-add 'after-find-file :before 'run-bs-first-buffer-hook)
+                (advice-add 'after-find-file :before 'run-bs-first-file-hook)
+                (advice-add 'project-switch-project :after 'run-bs-first-project-hook)
 
                 (add-hook 'window-buffer-change-functions 'run-bs-first-buffer-hook)
                 (add-hook 'dired-initial-position-hook 'run-bs-first-file-hook)
-                (add-hook 'pre-command-hook 'run-bs-first-input-hook))
+                (add-hook 'pre-command-hook 'run-bs-first-input-hook)
+                (add-hook 'find-file-hook 'run-bs-first-project-hook))
             -100)
 
   (add-hook 'server-visit-hook 'run-bs-first-buffer-hook))
