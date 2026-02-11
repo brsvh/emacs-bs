@@ -148,6 +148,7 @@ The BUFFER must be saved in a file."
   (let ((buffer (or buffer (current-buffer))))
     (with-current-buffer (get-buffer buffer)
       (and (buffer-file-name (get-buffer buffer))
+           (eq major-mode 'fundamental-mode)
            (bs/guess-buffer-major-mode buffer)))))
 
 ;;;###autoload
