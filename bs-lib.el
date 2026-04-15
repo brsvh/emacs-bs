@@ -57,7 +57,7 @@
 (defun bs-getenv (environ &optional default-value)
   "Get the value of ENVIRON.
 
-When DEFAULT-VALUE is non-nil, if the ENVIRON's value is nil, return the
+When DEFAULT-VALUE is non-nil, if the ENVIRON value is nil, return the
 DEFAULT-VALUE."
   (let ((value (getenv environ)))
     (if (null value)

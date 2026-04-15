@@ -34,7 +34,7 @@
 (require 'tabify)
 
 (defgroup bs nil
-  "Customize Bingshan's Emacs extension."
+  "Customize Bingshan Emacs extension."
   :prefix "bs-"
   :group 'emacs)
 
