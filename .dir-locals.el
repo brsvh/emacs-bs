@@ -5,7 +5,7 @@
   .
   ((jinx-dir-local-words . "
 Keymap bingshan bs config docstrings emacs flet keymap sexp sw
-whitespaces
+tabspaces whitespaces
 ")))
 
  (emacs-lisp-mode
