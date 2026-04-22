@@ -3,13 +3,9 @@
 
 ((nil
   .
-  ((jinx-dir-local-words . "
-Keymap bingshan bs config docstrings emacs flet keymap sexp sw
-tabspaces whitespaces
-")))
+  ((sentence-end-double-space . t)))
 
  (emacs-lisp-mode
   .
   ((fill-column . 70)
-   (indent-tabs-mode . nil)
-   (sentence-end-double-space . t))))
+   (indent-tabs-mode . nil))))
