@@ -133,49 +133,17 @@ SCOPE is the scope description for error messages."
                   scope))
     target))
 
-(defun bs-eat--reusable-window-p (window &optional buffer)
-  "Return non-nil when WINDOW can safely display BUFFER.
+(defun bs-eat--display-buffer (buffer &optional other-window)
+  "Display BUFFER via `pop-to-buffer'.
 
-WINDOW is the window to test.
-BUFFER, when non-nil, is the buffer object to display."
-  (and (window-live-p window)
-       (or (eq (window-buffer window) buffer)
-           (not (window-dedicated-p window)))))
-
-(defun bs-eat--find-window (&optional buffer)
-  "Return a visible Eat window, preferring BUFFER when non-nil.
-
-BUFFER, when non-nil, is the buffer object to prefer."
-  (or (and buffer
-           (let ((window (get-buffer-window buffer)))
-             (and (bs-eat--reusable-window-p window buffer)
-                  window)))
-      (catch 'found
-        (walk-windows
-         (lambda (window)
-           (when (and (bs-eat--eat-buffer-p (window-buffer window))
-                      (bs-eat--reusable-window-p window buffer))
-             (throw 'found window)))
-         'no-minibuf)
-        nil)))
-
-(defun bs-eat--show-in-window (buffer window)
-  "Display BUFFER in WINDOW and select WINDOW.
-
-BUFFER is the buffer object to display.
-WINDOW is the window used to display BUFFER."
-  (unless (eq (window-buffer window) buffer)
-    (set-window-buffer window buffer))
-  (select-window window)
+BUFFER is the buffer to display.
+When OTHER-WINDOW is non-nil, avoid reusing the selected window.
+Window placement itself is delegated to user `display-buffer'
+rules."
+  (pop-to-buffer buffer
+                 (and other-window
+                      '(nil . ((inhibit-same-window . t)))))
   buffer)
-
-(defun bs-eat--show-buffer (buffer)
-  "Display BUFFER using the current Eat window preference.
-
-BUFFER is the buffer to display."
-  (if-let* ((window (bs-eat--find-window buffer)))
-      (bs-eat--show-in-window buffer window)
-    (switch-to-buffer-other-window buffer)))
 
 (defun bs-eat--first-idle-buffer (buffers)
   "Return the smallest-numbered idle buffer from BUFFERS.
@@ -192,40 +160,38 @@ BUFFERS is the list of candidate buffers.
 SCOPE is the scope description for error messages.
 BUFFER, when non-nil, is the buffer object or buffer name to
 switch to."
-  (switch-to-buffer
+  (bs-eat--display-buffer
    (if buffer
        (bs-eat--require-buffer buffer buffers scope)
      (or (car buffers)
          (user-error "No Eat buffers are associated with %s"
                      scope)))))
 
-(defun bs-eat--open-session (display-buffer-fn &optional project)
-  "Create a new Eat session with DISPLAY-BUFFER-FN and PROJECT.
+(defun bs-eat--open-session (&optional project other-window)
+  "Create a new Eat session for PROJECT.
 
-DISPLAY-BUFFER-FN is a function that displays the new Eat buffer.
 PROJECT, when non-nil, is the project instance used for the session
-root directory and buffer name."
+root directory and buffer name.
+When OTHER-WINDOW is non-nil, avoid reusing the selected window."
   (let* ((default-directory (if project
                                 (project-root project)
                               default-directory))
          (eat-buffer-name (if project
                               (project-prefixed-buffer-name "eat")
                             eat-buffer-name)))
-    (eat--1 nil t display-buffer-fn)))
+    (eat--1 nil t
+            (lambda (buffer)
+              (bs-eat--display-buffer buffer other-window)))))
 
-(defun bs-eat--reuse-or-open (buffers command other-window-command)
-  "Reuse or create an Eat session from BUFFERS using COMMAND.
+(defun bs-eat--reuse-or-open (buffers open-command)
+  "Reuse or create an Eat session from BUFFERS with OPEN-COMMAND.
 
 BUFFERS is the list of candidate buffers.
-COMMAND is the command used to create a same-window session.
-OTHER-WINDOW-COMMAND is the command used to create an other-window
-session."
+OPEN-COMMAND is the command used to create a new session when no
+idle buffer is available."
   (if-let* ((buffer (bs-eat--first-idle-buffer buffers)))
-      (bs-eat--show-buffer buffer)
-    (if-let* ((window (bs-eat--find-window)))
-        (with-selected-window window
-          (funcall command))
-      (funcall other-window-command))))
+      (bs-eat--display-buffer buffer)
+    (funcall open-command)))
 
 (defun bs-eat-directory-buffers ()
   "Return the Eat buffers associated with the current directory."
@@ -278,34 +244,31 @@ switch to."
 (defun bs/eat-open ()
   "Start a new Eat session for the current directory."
   (interactive)
-  (bs-eat--open-session #'pop-to-buffer-same-window))
+  (bs-eat--open-session))
 
 ;;;###autoload
 (defun bs/eat-open-other-window ()
   "Start a new Eat session for the current directory in another window."
   (interactive)
-  (bs-eat--open-session #'switch-to-buffer-other-window))
+  (bs-eat--open-session nil t))
 
 ;;;###autoload
 (defun bs/eat-project-open ()
   "Start a new Eat session for the current project."
   (interactive)
-  (bs-eat--open-session #'pop-to-buffer-same-window
-                        (project-current t)))
+  (bs-eat--open-session (project-current t)))
 
 ;;;###autoload
 (defun bs/eat-project-open-other-window ()
   "Start a new Eat session for the current project in another window."
   (interactive)
-  (bs-eat--open-session #'switch-to-buffer-other-window
-                        (project-current t)))
+  (bs-eat--open-session (project-current t) t))
 
 ;;;###autoload
 (defun bs/eat-dwim ()
   "Reuse an idle Eat session for the current directory or create one."
   (interactive)
   (bs-eat--reuse-or-open (bs-eat-directory-buffers)
-                         #'bs/eat-open
                          #'bs/eat-open-other-window))
 
 ;;;###autoload
@@ -313,7 +276,6 @@ switch to."
   "Reuse an idle Eat session for the current project or create one."
   (interactive)
   (bs-eat--reuse-or-open (bs-eat-project-buffers)
-                         #'bs/eat-project-open
                          #'bs/eat-project-open-other-window))
 
 (provide 'bs-eat)
