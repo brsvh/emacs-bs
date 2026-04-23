@@ -145,6 +145,135 @@ rules."
                       '(nil . ((inhibit-same-window . t)))))
   buffer)
 
+(defun bs-eat--sort-buffers (buffers)
+  "Return BUFFERS sorted by their Eat instance number."
+  (sort (copy-sequence buffers) #'bs-eat--buffer-sort-p))
+
+(defun bs-eat--process-live-p (buffer)
+  "Return non-nil when BUFFER has a live process."
+  (process-live-p (get-buffer-process buffer)))
+
+(defun bs-eat--running-buffer-p (buffer)
+  "Return non-nil when BUFFER has a live foreground job."
+  (when-let* ((process (get-buffer-process buffer)))
+    (and (process-live-p process)
+         (bs-eat--foreground-job-running-p process))))
+
+(defun bs-eat--exited-buffer-p (buffer)
+  "Return non-nil when BUFFER no longer has a live process."
+  (not (bs-eat--process-live-p buffer)))
+
+(defun bs-eat--buffer-label (count &optional qualifier)
+  "Return a human-readable buffer label for COUNT and QUALIFIER."
+  (format "%s%s"
+          (if qualifier
+              (format "%s Eat buffer" qualifier)
+            "Eat buffer")
+          (if (= count 1) "" "s")))
+
+(defun bs-eat--report-no-buffers (scope &optional qualifier)
+  "Report that no Eat buffers for SCOPE match QUALIFIER."
+  (message "No %s are associated with %s"
+           (bs-eat--buffer-label 2 qualifier)
+           scope))
+
+(defun bs-eat--report-killed-buffers (killed total scope &optional qualifier)
+  "Report that KILLED of TOTAL Eat buffers for SCOPE were removed.
+
+QUALIFIER describes the kind of buffers that were targeted."
+  (if (= killed total)
+      (message "Killed %d %s for %s"
+               killed
+               (bs-eat--buffer-label killed qualifier)
+               scope)
+    (message "Killed %d of %d %s for %s"
+             killed
+             total
+             (bs-eat--buffer-label total qualifier)
+             scope)))
+
+(defun bs-eat--bottom-window-p (window)
+  "Return non-nil when WINDOW is at the bottom of its frame."
+  (window-at-side-p window 'bottom))
+
+(defun bs-eat--bottom-windows-for-buffer (buffer)
+  "Return visible bottom windows currently displaying BUFFER."
+  (seq-filter #'bs-eat--bottom-window-p
+              (get-buffer-window-list buffer nil 'visible)))
+
+(defun bs-eat--delete-windows-safely (windows)
+  "Delete live WINDOWS, ignoring windows that cannot be deleted."
+  (dolist (window windows)
+    (when (window-live-p window)
+      (ignore-errors
+        (delete-window window)))))
+
+(defun bs-eat--kill-buffer-no-query (buffer)
+  "Kill BUFFER without running `process-kill-buffer-query-function'."
+  (let ((bottom-windows (bs-eat--bottom-windows-for-buffer buffer)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let ((kill-buffer-query-functions
+               (remq #'process-kill-buffer-query-function
+                     kill-buffer-query-functions)))
+          (when (kill-buffer buffer)
+            (bs-eat--delete-windows-safely bottom-windows)))))))
+
+(defun bs-eat--kill-buffers-no-query (buffers)
+  "Kill BUFFERS without per-buffer process kill confirmation."
+  (let (killed-buffers)
+    (dolist (buffer buffers (nreverse killed-buffers))
+      (when (bs-eat--kill-buffer-no-query buffer)
+        (push buffer killed-buffers)))))
+
+(defun bs-eat--clear-buffers-if (buffers scope qualifier predicate)
+  "Kill BUFFERS for SCOPE that match PREDICATE.
+
+QUALIFIER describes the kind of buffers being removed."
+  (let* ((targets (seq-filter predicate (bs-eat--sort-buffers buffers)))
+         (total (length targets)))
+    (if (zerop total)
+        (progn
+          (bs-eat--report-no-buffers scope qualifier)
+          nil)
+      (let ((killed-buffers (bs-eat--kill-buffers-no-query targets)))
+        (bs-eat--report-killed-buffers
+         (length killed-buffers) total scope qualifier)
+        killed-buffers))))
+
+(defun bs-eat--confirm-buffer-kill (buffers running-buffers scope)
+  "Confirm killing BUFFERS for SCOPE when RUNNING-BUFFERS is non-nil."
+  (let ((total (length buffers))
+        (running-count (length running-buffers)))
+    (or (zerop running-count)
+        (y-or-n-p
+         (format "Kill %d %s for %s, including %d running process%s? "
+                 total
+                 (bs-eat--buffer-label total)
+                 scope
+                 running-count
+                 (if (= running-count 1) "" "es"))))))
+
+(defun bs-eat--kill-buffers (buffers scope)
+  "Kill BUFFERS for SCOPE, confirming only once for running processes."
+  (let* ((targets (bs-eat--sort-buffers buffers))
+         (total (length targets))
+         (running-buffers (seq-filter #'bs-eat--running-buffer-p targets)))
+    (cond
+     ((zerop total)
+      (bs-eat--report-no-buffers scope)
+      nil)
+     ((not (bs-eat--confirm-buffer-kill targets running-buffers scope))
+      (message "Canceled killing %d %s for %s"
+               total
+               (bs-eat--buffer-label total)
+               scope)
+      nil)
+     (t
+      (let ((killed-buffers (bs-eat--kill-buffers-no-query targets)))
+        (bs-eat--report-killed-buffers (length killed-buffers) total scope)
+        killed-buffers)))))
+
 (defun bs-eat--first-idle-buffer (buffers)
   "Return the smallest-numbered idle buffer from BUFFERS.
 
@@ -239,6 +368,62 @@ switch to."
   (bs-eat--switch-buffer (bs-eat-project-buffers)
                          "the current project"
                          buffer))
+
+;;;###autoload
+(defun bs/eat-clear-buffers ()
+  "Kill exited Eat buffers associated with the current directory."
+  (interactive)
+  (bs-eat--clear-buffers-if (bs-eat-directory-buffers)
+                            "the current directory"
+                            "exited"
+                            #'bs-eat--exited-buffer-p))
+
+;;;###autoload
+(defun bs/eat-clear-idle-buffers ()
+  "Kill idle Eat buffers associated with the current directory."
+  (interactive)
+  (bs-eat--clear-buffers-if (bs-eat-directory-buffers)
+                            "the current directory"
+                            "idle"
+                            #'bs-eat--idle-buffer-p))
+
+;;;###autoload
+(defun bs/eat-kill-buffers ()
+  "Kill Eat buffers associated with the current directory.
+
+When any associated buffer has a running process, ask only once
+before killing all of them."
+  (interactive)
+  (bs-eat--kill-buffers (bs-eat-directory-buffers)
+                        "the current directory"))
+
+;;;###autoload
+(defun bs/eat-project-clear-buffers ()
+  "Kill exited Eat buffers associated with the current project."
+  (interactive)
+  (bs-eat--clear-buffers-if (bs-eat-project-buffers)
+                            "the current project"
+                            "exited"
+                            #'bs-eat--exited-buffer-p))
+
+;;;###autoload
+(defun bs/eat-project-clear-idle-buffers ()
+  "Kill idle Eat buffers associated with the current project."
+  (interactive)
+  (bs-eat--clear-buffers-if (bs-eat-project-buffers)
+                            "the current project"
+                            "idle"
+                            #'bs-eat--idle-buffer-p))
+
+;;;###autoload
+(defun bs/eat-project-kill-buffers ()
+  "Kill Eat buffers associated with the current project.
+
+When any associated buffer has a running process, ask only once
+before killing all of them."
+  (interactive)
+  (bs-eat--kill-buffers (bs-eat-project-buffers)
+                        "the current project"))
 
 ;;;###autoload
 (defun bs/eat-open ()
