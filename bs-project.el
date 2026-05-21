@@ -31,7 +31,13 @@
 
 (require 'cl-lib)
 (require 'project)
-(require 'tabspaces)
+
+(declare-function tabspaces--current-tab-name "tabspaces")
+(declare-function tabspaces--get-project-for-tab "tabspaces")
+(declare-function tabspaces--list-tabspaces "tabspaces")
+(declare-function tabspaces-generate-descriptive-tab-name "tabspaces")
+
+(defvar tabspaces-project-tab-map)
 
 (defun bs-project-directory-normalizer (directory)
   "Return DIRECTORY as an expanded directory name."
