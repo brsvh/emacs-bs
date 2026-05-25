@@ -98,11 +98,11 @@ Each entry is an alist.  Expected fields include `id', `name',
   created updated skipped records)
 
 (defconst bs-carddav--metadata-labels
-  '((addressbook-id . "BINGSHAN_ADDRESSBOOK_ID")
-    (href . "BINGSHAN_CARDDAV_HREF")
-    (etag . "BINGSHAN_CARDDAV_ETAG")
-    (uid . "BINGSHAN_VCARD_UID")
-    (last-synced-at . "BINGSHAN_LAST_SYNCED_AT"))
+  '((addressbook-id . "ADDRESSBOOK_ID")
+    (href . "CARDDAV_HREF")
+    (etag . "CARDDAV_ETAG")
+    (uid . "VCARD_UID")
+    (last-synced-at . "LAST_SYNCED_AT"))
   "EBDB user field labels used to store CardDAV sync metadata.")
 
 (defun bs-carddav--key (key)
