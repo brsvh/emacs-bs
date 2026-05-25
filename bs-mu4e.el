@@ -4,7 +4,7 @@
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "30.1") (mu4e "1.12.13"))
 ;; Version: 0.1.0
 
 ;; This file is not part of GNU Emacs.

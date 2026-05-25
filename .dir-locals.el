@@ -8,4 +8,8 @@
  (emacs-lisp-mode
   .
   ((fill-column . 70)
-   (indent-tabs-mode . nil))))
+   (indent-tabs-mode . nil)))
+
+ (org-mode
+  .
+  ((fill-column . 80))))

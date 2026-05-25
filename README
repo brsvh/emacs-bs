@@ -23,6 +23,14 @@ them.
 
 *THIS WORK STILL IN PROGRESS*
 
+* AI Assistance Disclosure
+
+Parts of the code, tests, and documentation in this project were developed with
+assistance from AI tools.  All AI-generated output was reviewed and modified by
+the maintainer where necessary.  The maintainer remains responsible for the
+final content.  No secrets, private user data, or other sensitive information
+were intentionally provided to AI tools.
+
 * COPYING
 
 #+begin_src text
