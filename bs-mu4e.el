@@ -32,8 +32,10 @@
 (require 'mail-parse)
 (require 'subr-x)
 
+(declare-function ebdb-complete-keybinding-setup "ebdb-complete")
 (declare-function ebdb-dwim-mail "ebdb" (record &optional mail))
 (declare-function ebdb-record-mail "ebdb" (record &optional no-roles label defunct))
+(declare-function message-tab "message" ())
 (declare-function mu4e--compose-complete-handler "mu4e-compose" (str pred action))
 (declare-function mu4e-contact-email "mu4e-contacts")
 (declare-function mu4e-contact-name "mu4e-contacts")
@@ -42,7 +44,12 @@
 
 (defvar ebdb-after-read-db-hook)
 (defvar ebdb-dwim-completion-cache)
+(defvar ebdb-mode-hook)
+(defvar ebdb-mode-map)
 (defvar ebdb-record-tracker)
+(defvar mail-mode-map)
+(defvar message-completion-alist)
+(defvar message-mode-map)
 (defvar mu4e--contacts-set)
 
 (defgroup bs-mu4e nil
@@ -231,6 +238,21 @@ removed, and bare email names fall back to the email address alone."
                         ebdb-dwim-completion-cache
                         :test #'equal)))))))
 
+(defun bs-mu4e-ebdb-complete-restore-standard-completion (&rest _)
+  "Keep EBDB Complete from bypassing CAPF in mail buffers."
+  (when (boundp 'ebdb-mode-hook)
+    (remove-hook 'ebdb-mode-hook #'ebdb-complete-keybinding-setup))
+  (when (boundp 'ebdb-mode-map)
+    (define-key ebdb-mode-map (kbd "q") #'quit-window))
+  (when (boundp 'message-completion-alist)
+    (setq message-completion-alist
+          (cl-remove 'ebdb-complete-mail message-completion-alist
+                     :key #'cdr :test #'eq)))
+  (when (boundp 'message-mode-map)
+    (define-key message-mode-map (kbd "TAB") #'message-tab))
+  (when (boundp 'mail-mode-map)
+    (define-key mail-mode-map (kbd "TAB") nil)))
+
 (defun bs-mu4e-add-around-advice (symbol function)
   "Add FUNCTION as around advice to SYMBOL unless already present."
   (unless (advice-member-p function symbol)
@@ -258,6 +280,17 @@ removed, and bare email names fall back to the email address alone."
     (bs-mu4e-add-around-advice
      'mu4e--compose-complete-handler
      #'bs-mu4e-mu4e-compose-complete-handler)))
+
+;;;###autoload
+(defun bs-mu4e-ebdb-complete-enable ()
+  "Keep EBDB Complete completion on standard mail buffer CAPF."
+  (interactive)
+  (with-eval-after-load 'ebdb-complete
+    (bs-mu4e-ebdb-complete-restore-standard-completion)
+    (unless (advice-member-p #'bs-mu4e-ebdb-complete-restore-standard-completion
+                             'ebdb-complete-enable)
+      (advice-add 'ebdb-complete-enable
+                  :after #'bs-mu4e-ebdb-complete-restore-standard-completion))))
 
 (defun bs-mu4e-headers-field-value (function msg field)
   "Format MSG FIELD, hiding email addresses embedded in From names.
