@@ -74,6 +74,9 @@
 (defvar ctl-c-w-map (make-keymap)
   "Keymap for sub-commands of \\`C-c w'.")
 
+(defvar ctl-c-x-map (make-keymap)
+  "Keymap for sub-commands of \\`C-c x'.")
+
 (defvar ctl-c-map (make-keymap)
   "Default Keymap for \\`C-c' commands.")
 
@@ -184,6 +187,7 @@ The BUFFER must be saved in a file."
   (keymap-set ctl-c-map  "t"      ctl-c-t-map)
   (keymap-set ctl-c-map  "v"      ctl-c-v-map)
   (keymap-set ctl-c-map  "w"      ctl-c-w-map)
+  (keymap-set ctl-c-map  "x"      ctl-c-x-map)
   (keymap-set ctl-c-map  "<home>" ctl-c-home-map))
 
 (provide 'bs-ext)
