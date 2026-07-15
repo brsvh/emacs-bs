@@ -75,9 +75,7 @@
                       ;
                   in
                   melpaBuild {
-                    ename = "emacs-bs";
-
-                    files = ''("emacs-bs.el" "bs-*.el")'';
+                    files = ''("bs.el" "bs-*.el")'';
 
                     packageRequires = [
                       ebdb

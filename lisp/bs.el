@@ -1,4 +1,4 @@
-;;; emacs-bs.el --- Personal Emacs Lisp extensions -*- lexical-binding: t; -*-
+;;; bs.el --- Personal Emacs Lisp extensions -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2022-2026 Bingshan Chang
 
@@ -31,10 +31,9 @@
 (require 'bs-lib)
 (require 'bs-ext)
 (require 'bs-hooks)
-(require 'bs-lisp-mode)
 (require 'bs-project)
 (require 'bs-carddav)
 (require 'bs-mu4e)
 
-(provide 'emacs-bs)
-;;; emacs-bs.el ends here
+(provide 'bs)
+;;; bs.el ends here
