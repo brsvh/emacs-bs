@@ -17,6 +17,7 @@ let
     ;
 
   inherit (pkgs)
+    mdformat
     writeText
     ;
 
@@ -24,8 +25,18 @@ let
     toml
     ;
 
+  mdformatWithPlugins = mdformat.withPlugins (
+    ps: with ps; [
+      mdformat-footnote
+      mdformat-frontmatter
+      mdformat-gfm
+      mdformat-gfm-alerts
+    ]
+  );
+
   formatters = with pkgs; [
     elisp-format
+    mdformatWithPlugins
     nixfmt
   ];
 in
@@ -56,6 +67,13 @@ in
           indent_style = "space";
           max_line_length = 80;
           tab_width = 2;
+        };
+
+        "*.md" = {
+          indent_size = 2;
+          indent_style = "space";
+          max_line_length = 80;
+          trim_trailing_whitespace = false;
         };
 
         "README" = {
@@ -188,6 +206,24 @@ in
 
             includes = [
               "*.el"
+            ];
+          };
+
+          markdown = {
+            command = "mdformat";
+
+            includes = [
+              "*.md"
+            ];
+
+            options = [
+              "--extensions=footnote"
+              "--extensions=frontmatter"
+              "--extensions=gfm"
+              "--extensions=gfm_alerts"
+              "--extensions=tables"
+              "--number"
+              "--wrap=80"
             ];
           };
 
