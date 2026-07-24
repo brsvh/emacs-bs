@@ -97,7 +97,7 @@
                   };
 
                 scope = finalAttrs: _: {
-                  emacs-bs = finalAttrs.callPackage emacs-bs {
+                  bs = finalAttrs.callPackage emacs-bs {
                     inherit
                       projectRoot
                       ;
