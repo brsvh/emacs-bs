@@ -86,7 +86,7 @@
 
                     meta = {
                       description = "Personal Emacs Lisp extensions";
-                      homepage = "https://codeberg.org/bingshan/emacs-bs";
+                      homepage = "https://github.com/brsvh/emacs-bs";
                       license = licenses.gpl3Plus;
                       maintainers = with maintainers; [ brsvh ];
                     };
@@ -105,9 +105,7 @@
                 };
               in
               {
-                emacsPackagesFor =
-                  emacs:
-                  (emacsPackagesFor emacs).overrideScope scope;
+                emacsPackagesFor = emacs: (emacsPackagesFor emacs).overrideScope scope;
               };
           };
         };

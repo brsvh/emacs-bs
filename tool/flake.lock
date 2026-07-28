@@ -49,18 +49,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1783389639,
-        "narHash": "sha256-MJwP0GHdEW3zZD2v4QEavHL8KAh3cvFzENOPKBQMRBs=",
+        "lastModified": 1785124180,
+        "narHash": "sha256-PF0RsofW3uggABox+9ZBX30qRzwI13UtYnYCw0mkMVs=",
         "ref": "main",
-        "rev": "f3fde1015bf4ce48fda70190d73d9e321e241e9a",
-        "revCount": 133,
+        "rev": "fc6723fb100ddf1e3c147593714a8627fb644e8d",
+        "revCount": 143,
         "type": "git",
-        "url": "https://codeberg.org/bingshan/infix.git"
+        "url": "https://github.com/brsvh/infix.git"
       },
       "original": {
         "ref": "main",
         "type": "git",
-        "url": "https://codeberg.org/bingshan/infix.git"
+        "url": "https://github.com/brsvh/infix.git"
       }
     },
     "nixpkgs": {
