@@ -52,7 +52,6 @@
 (declare-function mu4e-mark-restore "mu4e-mark" (docid))
 (declare-function mu4e-message-field "mu4e-message")
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
-(declare-function mu4e-personal-address-p "mu4e-contacts" (address))
 (declare-function mu4e-search-rerun "mu4e-search" ())
 (declare-function mu4e-view "mu4e-view" (msg))
 (declare-function mu4e~headers-apply-flags "mu4e-headers" (msg fieldval))
@@ -425,7 +424,6 @@ delegates all other fields to FUNCTION."
     mu4e-headers-prev
     mu4e-message-at-point
     mu4e-message-field
-    mu4e-personal-address-p
     mu4e~headers-apply-flags
     mu4e~headers-clear
     mu4e~headers-docid-at-point
@@ -578,26 +576,10 @@ delegates all other fields to FUNCTION."
     (or (memq 'new flags)
         (memq 'unread flags))))
 
-(defun bs-mu4e--headers-sent-p (msg)
-  "Return non-nil when MSG was sent from a personal address."
-  (when-let* ((from (car-safe (mu4e-message-field msg :from)))
-              (address (mu4e-contact-email from)))
-    (mu4e-personal-address-p address)))
-
 (defun bs-mu4e--headers-correspondent (msg)
-  "Return the correspondent display string for MSG.
-
-Received messages show their senders.  Sent messages show at most
-the first two recipients followed by the number of remaining
-recipients."
-  (let* ((sent (bs-mu4e--headers-sent-p msg))
-         (contacts (mu4e-message-field msg (if sent :to :from)))
-         (names (mapcar #'bs-mu4e-contact-display-name contacts)))
-    (if (and sent (> (length names) 2))
-        (format "%s +%d"
-                (string-join (cl-subseq names 0 2) ", ")
-                (- (length names) 2))
-      (string-join names ", "))))
+  "Return the sender display string for MSG."
+  (bs-mu4e-contact-display-names
+   (mu4e-message-field msg :from)))
 
 (defun bs-mu4e--headers-thread-key (msg)
   "Return a stable-enough thread key for MSG."
