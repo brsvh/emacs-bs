@@ -103,6 +103,11 @@
   "Personal mu4e extensions."
   :group 'mu4e)
 
+(defcustom bs-mu4e-headers-thread-count-digits 4
+  "Minimum decimal digits reserved for thread message counts."
+  :type 'natnum
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-ebdb-ignored-local-part-regexp
   (concat
    "\\`\\(?:"
@@ -539,13 +544,34 @@ recipients."
        when (<= (string-width candidate) max-width)
        return candidate))))
 
-(defun bs-mu4e--headers-title-line (thread width)
-  "Return the title line for THREAD fitted to WIDTH."
+(defun bs-mu4e--headers-thread-count-label (thread)
+  "Return the message-count label for THREAD."
+  (format "[%d%s]"
+          (length (plist-get thread :messages))
+          (if (plist-get thread :complete) "" "+")))
+
+(defun bs-mu4e--headers-thread-count-width ()
+  "Return the widest message-count label in the current headers model."
+  (max
+   (+ bs-mu4e-headers-thread-count-digits 2)
+   (cl-loop for thread in bs-mu4e--headers-threads
+            maximize (string-width
+                      (bs-mu4e--headers-thread-count-label thread))
+            into width
+            finally return (or width 0))))
+
+(defun bs-mu4e--headers-title-line (thread width count-width)
+  "Return the title line for THREAD fitted to WIDTH.
+
+Right-align its message-count label to COUNT-WIDTH columns."
   (let* ((messages (plist-get thread :messages))
          (root (car messages))
-         (count (format "[%d%s]"
-                        (length messages)
-                        (if (plist-get thread :complete) "" "+")))
+         (count (bs-mu4e--headers-thread-count-label thread))
+         (count (concat
+                 (make-string
+                  (max 0 (- count-width (string-width count)))
+                  ?\s)
+                 count))
          (subject (bs-mu4e--headers-sanitize-string
                    (mu4e-message-field root :subject)))
          (tag-limit (min (floor width 3)
@@ -578,7 +604,7 @@ recipients."
          (flags-width (bs-mu4e--headers-field-width
                        :flags (string-width flags)))
          (flags (bs-mu4e--headers-fit flags flags-width))
-         (date (mu4e~headers-field-value msg :human-date))
+         (date (concat (mu4e~headers-field-value msg :human-date) " "))
          (correspondent (bs-mu4e--headers-correspondent msg))
          (correspondent-width
           (min
@@ -681,13 +707,15 @@ recipients."
         (bs-mu4e--headers-unread-p msg)
         (mu4e-mark-docid-marked-p docid))))
 
-(defun bs-mu4e--headers-insert-thread (thread width)
-  "Insert THREAD at point for WIDTH and update its region markers."
+(defun bs-mu4e--headers-insert-thread (thread width count-width)
+  "Insert THREAD at point for WIDTH and update its region markers.
+
+Right-align its message-count label to COUNT-WIDTH columns."
   (let ((start (point))
         (anchor (bs-mu4e--headers-fold-anchor thread))
         (hidden 0)
         (mu4e~headers-thread-state nil))
-    (insert (bs-mu4e--headers-title-line thread width) "\n")
+    (insert (bs-mu4e--headers-title-line thread width count-width) "\n")
     (dolist (msg (plist-get thread :messages))
       (let ((prefix (if mu4e-search-threads
                         (mu4e~headers-thread-prefix
@@ -753,6 +781,7 @@ recipients."
     (let ((docid (or preferred-docid
                      (mu4e~headers-docid-at-point)))
           (width (bs-mu4e--headers-width))
+          (count-width (bs-mu4e--headers-thread-count-width))
           (inhibit-read-only t))
       (bs-mu4e--headers-clear-thread-markers)
       (remove-overlays)
@@ -760,7 +789,7 @@ recipients."
       (goto-char (point-min))
       (bs-mu4e--headers-insert-summary)
       (dolist (thread bs-mu4e--headers-threads)
-        (bs-mu4e--headers-insert-thread thread width))
+        (bs-mu4e--headers-insert-thread thread width count-width))
       (setq bs-mu4e--headers-render-width width
             header-line-format nil)
       (bs-mu4e--headers-restore-marks)
@@ -789,7 +818,8 @@ recipients."
           (goto-char start)
           (bs-mu4e--headers-insert-thread
            thread (or bs-mu4e--headers-render-width
-                      (bs-mu4e--headers-width)))
+                      (bs-mu4e--headers-width))
+           (bs-mu4e--headers-thread-count-width))
           (bs-mu4e--headers-restore-marks thread)
           (bs-mu4e--headers-restore-selection docid))
       (bs-mu4e--headers-render docid))))
