@@ -113,6 +113,29 @@
   "Face for message correspondents in thread listings."
   :group 'bs-mu4e)
 
+(defface bs-mu4e-headers-label-face
+  '((t :inherit mu4e-header-face :weight regular :underline nil))
+  "Parent face for labels in thread listings."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-thread-count-face
+  '((t :inherit (font-lock-keyword-face bs-mu4e-headers-label-face)
+       :weight semibold :inverse-video t))
+  "Face for thread message-count labels."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-tag-face
+  '((t :inherit (font-lock-constant-face bs-mu4e-headers-label-face)
+       :inverse-video t))
+  "Face for message tag labels."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-timestamp-face
+  '((t :inherit (shadow bs-mu4e-headers-label-face)
+       :weight regular))
+  "Face for message timestamps."
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-headers-thread-count-digits 4
   "Minimum decimal digits reserved for thread message counts."
   :type 'natnum
@@ -484,6 +507,22 @@ delegates all other fields to FUNCTION."
     (concat string
             (make-string (max 0 (- width (string-width string))) ?\s))))
 
+(defun bs-mu4e--headers-preserve-faces (string)
+  "Move transient faces in STRING to persistent Font Lock faces."
+  (let ((end (length string))
+        (position 0))
+    (while (< position end)
+      (let* ((next (next-single-property-change
+                    position 'face string end))
+             (face (get-text-property position 'face string)))
+        (when face
+          (font-lock-append-text-property
+           position next 'font-lock-face face string)
+          (remove-text-properties
+           position next '(face nil) string))
+        (setq position next))))
+  string)
+
 (defun bs-mu4e--headers-root-p (msg)
   "Return non-nil when MSG starts a thread in Mu4e search results."
   (let* ((meta (mu4e-message-field msg :meta))
@@ -538,15 +577,21 @@ recipients."
       ""
     (let* ((tags (mapcar
                   (lambda (tag)
-                    (format "[%s]"
-                            (bs-mu4e--headers-sanitize-string tag)))
+                    (propertize
+                     (format "[%s]"
+                             (bs-mu4e--headers-sanitize-string tag))
+                     'font-lock-face 'bs-mu4e-headers-tag-face))
                   tags))
            (count (length tags)))
       (cl-loop
        for shown from count downto 0
        for omitted = (- count shown)
        for visible = (string-join (cl-subseq tags 0 shown) " ")
-       for suffix = (if (> omitted 0) (format "+%d" omitted) "")
+       for suffix = (if (> omitted 0)
+                        (propertize
+                         (format "+%d" omitted)
+                         'font-lock-face 'bs-mu4e-headers-tag-face)
+                      "")
        for candidate = (string-join
                         (cl-remove-if
                          #'string-empty-p (list visible suffix))
@@ -576,12 +621,15 @@ recipients."
 Right-align its message-count label to COUNT-WIDTH columns."
   (let* ((messages (plist-get thread :messages))
          (root (car messages))
-         (count (bs-mu4e--headers-thread-count-label thread))
+         (count-label
+          (propertize
+           (bs-mu4e--headers-thread-count-label thread)
+           'font-lock-face 'bs-mu4e-headers-thread-count-face))
          (count (concat
                  (make-string
-                  (max 0 (- count-width (string-width count)))
+                  (max 0 (- count-width (string-width count-label)))
                   ?\s)
-                 count))
+                 count-label))
          (subject (bs-mu4e--headers-sanitize-string
                    (mu4e-message-field root :subject)))
          (tag-limit (min (floor width 3)
@@ -604,9 +652,11 @@ Right-align its message-count label to COUNT-WIDTH columns."
                     (max 1 (- width
                               (string-width left)
                               (string-width tags))))))
-    (propertize
-     (concat left (make-string padding ?\s) tags)
-     'face 'bs-mu4e-headers-title-face)))
+    (let ((line (concat left (make-string padding ?\s) tags)))
+      (font-lock-append-text-property
+       0 (length line) 'font-lock-face
+       'bs-mu4e-headers-title-face line)
+      line)))
 
 (defun bs-mu4e--headers-message-line (msg prefix width)
   "Return a rendered message line for MSG with PREFIX at WIDTH."
@@ -641,13 +691,21 @@ Right-align its message-count label to COUNT-WIDTH columns."
                           (string-width left)
                           (string-width date))))
          (visible (concat left (make-string padding ?\s) date))
-         (visible (mu4e~headers-apply-flags msg visible))
+         (visible
+          (bs-mu4e--headers-preserve-faces
+           (mu4e~headers-apply-flags msg visible)))
          (docid (mu4e-message-field msg :docid)))
     (unless (string-empty-p correspondent)
-      (add-face-text-property
+      (font-lock-append-text-property
        correspondent-start
        (+ correspondent-start (length correspondent))
-       'bs-mu4e-headers-correspondent-face t visible))
+       'font-lock-face
+       'bs-mu4e-headers-correspondent-face visible))
+    (font-lock-prepend-text-property
+     (- (length visible) (length date) 1)
+     (length visible)
+     'font-lock-face
+     'bs-mu4e-headers-timestamp-face visible)
     (propertize
      (concat (mu4e~headers-docid-cookie docid) visible "\n")
      'docid docid
@@ -657,7 +715,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
   "Return a summary line for COUNT folded messages."
   (propertize
    (format "-- %d hidden --\n" count)
-   'face 'mu4e-related-face))
+   'font-lock-face 'mu4e-related-face))
 
 (defun bs-mu4e--headers-window ()
   "Return a window suitable for sizing the headers buffer."
@@ -685,7 +743,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
            bs-mu4e--headers-match-count
            (if bs-mu4e--headers-search-complete "" "+")
            (bs-mu4e--headers-query))
-   'face 'mu4e-header-key-face))
+   'font-lock-face 'mu4e-header-key-face))
 
 (defun bs-mu4e--headers-clear-thread-markers ()
   "Detach all region markers owned by the current thread model."
