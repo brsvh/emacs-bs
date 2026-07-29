@@ -141,6 +141,11 @@
   :type 'natnum
   :group 'bs-mu4e)
 
+(defcustom bs-mu4e-headers-thread-count-padding 0.5
+  "Colored padding beside thread message counts, in character widths."
+  :type 'number
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-ebdb-ignored-local-part-regexp
   (concat
    "\\`\\(?:"
@@ -507,6 +512,23 @@ delegates all other fields to FUNCTION."
     (concat string
             (make-string (max 0 (- width (string-width string))) ?\s))))
 
+(defun bs-mu4e--headers-space (width &optional face)
+  "Return spacing WIDTH character widths wide using optional FACE."
+  (let* ((width (max 0.0 width))
+         (whole (floor width))
+         (fraction (- width whole))
+         (space (make-string whole ?\s)))
+    (when (> fraction 0.001)
+      (setq space
+            (concat
+             space
+             (propertize
+              " " 'display `(space :width ,fraction)))))
+    (when (and face (not (string-empty-p space)))
+      (put-text-property
+       0 (length space) 'font-lock-face face space))
+    space))
+
 (defun bs-mu4e--headers-preserve-faces (string)
   "Move transient faces in STRING to persistent Font Lock faces."
   (let ((end (length string))
@@ -600,15 +622,25 @@ recipients."
        return candidate))))
 
 (defun bs-mu4e--headers-thread-count-label (thread)
-  "Return the message-count label for THREAD."
-  (format "[%d%s]"
-          (length (plist-get thread :messages))
-          (if (plist-get thread :complete) "" "+")))
+  "Return the message-count label for THREAD.
+
+Show unread and total counts when THREAD contains unread messages,
+or only the total otherwise.  Append `+' when the thread is
+incomplete."
+  (let* ((messages (plist-get thread :messages))
+         (total (length messages))
+         (unread (cl-count-if #'bs-mu4e--headers-unread-p messages))
+         (count (if (> unread 0)
+                    (format "%d/%d" unread total)
+                  (number-to-string total))))
+    (format "%s%s"
+            count
+            (if (plist-get thread :complete) "" "+"))))
 
 (defun bs-mu4e--headers-thread-count-width ()
   "Return the widest message-count label in the current headers model."
   (max
-   (+ bs-mu4e-headers-thread-count-digits 2)
+   bs-mu4e-headers-thread-count-digits
    (cl-loop for thread in bs-mu4e--headers-threads
             maximize (string-width
                       (bs-mu4e--headers-thread-count-label thread))
@@ -621,6 +653,13 @@ recipients."
 Right-align its message-count label to COUNT-WIDTH columns."
   (let* ((messages (plist-get thread :messages))
          (root (car messages))
+         (padding-width
+          (max 0.0
+               (min 0.5 bs-mu4e-headers-thread-count-padding)))
+         (count-padding
+          (bs-mu4e--headers-space
+           padding-width 'bs-mu4e-headers-thread-count-face))
+         (count-gap (bs-mu4e--headers-space 1))
          (count-label
           (propertize
            (bs-mu4e--headers-thread-count-label thread)
@@ -629,30 +668,39 @@ Right-align its message-count label to COUNT-WIDTH columns."
                  (make-string
                   (max 0 (- count-width (string-width count-label)))
                   ?\s)
-                 count-label))
+                 count-padding
+                 count-label
+                 count-padding))
          (subject (bs-mu4e--headers-sanitize-string
                    (mu4e-message-field root :subject)))
-         (tag-limit (min (floor width 3)
-                         (max 0 (- width (string-width count) 2))))
+         (tag-limit
+          (min
+           (floor width 3)
+           (max
+            0
+            (floor
+             (- width count-width (* 2 padding-width) 2)))))
          (tags (bs-mu4e--headers-tag-string
                 (mu4e-message-field root :tags)
                 tag-limit))
-         (reserved (+ (string-width count)
+         (reserved (+ count-width (* 2 padding-width)
                       (if (string-empty-p tags)
                           1
                         (+ 2 (string-width tags)))))
          (subject (bs-mu4e--headers-truncate
-                   subject (max 0 (- width reserved))))
-         (left (string-join
-                (cl-remove-if
-                 #'string-empty-p (list count subject))
-                " "))
-         (padding (if (string-empty-p tags)
-                      0
-                    (max 1 (- width
-                              (string-width left)
-                              (string-width tags))))))
-    (let ((line (concat left (make-string padding ?\s) tags)))
+                   subject (max 0 (floor (- width reserved)))))
+         (left (concat count count-gap subject))
+         (left-width (+ count-width
+                        (* 2 padding-width)
+                        1
+                        (string-width subject)))
+         (tag-padding
+          (if (string-empty-p tags)
+              ""
+            (bs-mu4e--headers-space
+             (max 1.0
+                  (- width left-width (string-width tags)))))))
+    (let ((line (concat left tag-padding tags)))
       (font-lock-append-text-property
        0 (length line) 'font-lock-face
        'bs-mu4e-headers-title-face line)
@@ -859,6 +907,8 @@ Right-align its message-count label to COUNT-WIDTH columns."
           (width (bs-mu4e--headers-width))
           (count-width (bs-mu4e--headers-thread-count-width))
           (inhibit-read-only t))
+      (setq-local font-lock-extra-managed-props
+                  (delq 'display font-lock-extra-managed-props))
       (bs-mu4e--headers-clear-thread-markers)
       (remove-overlays)
       (erase-buffer)
