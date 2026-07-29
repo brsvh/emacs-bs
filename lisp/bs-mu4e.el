@@ -151,7 +151,7 @@
   :type 'number
   :group 'bs-mu4e)
 
-(defcustom bs-mu4e-ignored-local-part-regexp
+(defcustom bs-mu4e-ignored-contact-local-part-regexp
   (concat
    "\\`\\(?:"
    "abuse\\|alerts?\\|announcements?\\|automated\\|autoreply\\|"
@@ -164,7 +164,7 @@
    "undisclosedrecipients\\|unsubscribe\\|updates?\\|"
    "verif\\(?:y\\|ication\\)"
    "\\)\\'")
-  "Regexp matching compact email local parts ignored by mail completion.
+  "Regexp matching compact local parts ignored by contact completion.
 
 The local part is lower-cased, truncated before a plus tag, and
 then stripped of dots, dashes, and underscores before matching.
@@ -173,7 +173,7 @@ not every role-based mailbox such as support or info."
   :type 'regexp
   :group 'bs-mu4e)
 
-(defcustom bs-mu4e-ignored-display-name-regexp
+(defcustom bs-mu4e-ignored-contact-display-name-regexp
   (regexp-opt
    '("auto generated"
      "alert"
@@ -192,8 +192,17 @@ not every role-based mailbox such as support or info."
      "unsubscribe"
      "verification")
    'words)
-  "Regexp matching display names ignored by mail completion."
+  "Regexp matching display names ignored by contact completion."
   :type 'regexp
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-ignored-contact-email-regexps nil
+  "Regexps matching complete emails ignored by contact completion.
+
+Each regexp is matched against a lower-cased bare email address.
+The first matching regexp is reported by
+`bs-mu4e-contact-ignore-reasons'."
+  :type '(repeat regexp)
   :group 'bs-mu4e)
 
 (defun bs-mu4e-email-address-p (string)
@@ -262,20 +271,46 @@ removed, and bare email names fall back to the email address alone."
             "\\+"
             t)))))
 
-(defun bs-mu4e-ignored-mail-address-p (address)
-  "Return non-nil when ADDRESS looks like an automated sender."
+(defun bs-mu4e-contact-ignore-reasons (address)
+  "Return an alist explaining why ADDRESS is hidden from completion.
+
+Possible keys are `email-regexp', `local-part', and `display-name'.
+The associated value is respectively the matching complete-email
+regexp, compact local part, or normalized display name.  Return nil
+when ADDRESS is not ignored."
   (let* ((parsed (and (stringp address)
                       (mail-header-parse-address-lax address)))
          (email (if (consp parsed) (car parsed) parsed))
+         (email (and (stringp email)
+                     (downcase (string-trim email))))
          (name (and (consp parsed)
                     (bs-mu4e-trim-contact-name (cdr parsed))))
-         (local-part (bs-mu4e-email-compact-local-part email)))
-    (or (and local-part
-             (string-match-p bs-mu4e-ignored-local-part-regexp
-                             local-part))
-        (and name
-             (string-match-p bs-mu4e-ignored-display-name-regexp
-                             (downcase name))))))
+         (name (and name (downcase name)))
+         (local-part (bs-mu4e-email-compact-local-part email))
+         (email-regexp
+          (and email
+               (cl-find-if
+                (lambda (regexp)
+                  (string-match-p regexp email))
+                bs-mu4e-ignored-contact-email-regexps))))
+    (delq
+     nil
+     (list
+      (and email-regexp (cons 'email-regexp email-regexp))
+      (and local-part
+           (string-match-p
+            bs-mu4e-ignored-contact-local-part-regexp
+            local-part)
+           (cons 'local-part local-part))
+      (and name
+           (string-match-p
+            bs-mu4e-ignored-contact-display-name-regexp
+            name)
+           (cons 'display-name name))))))
+
+(defun bs-mu4e-ignored-mail-address-p (address)
+  "Return non-nil when ADDRESS looks like an automated sender."
+  (and (bs-mu4e-contact-ignore-reasons address) t))
 
 (defun bs-mu4e-completion-candidate (candidate)
   "Return normalized CANDIDATE, or nil when it should be hidden."
