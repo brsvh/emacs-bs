@@ -60,6 +60,7 @@
                 emacs-bs =
                   {
                     ebdb,
+                    khalel,
                     lib,
                     melpaBuild,
                     mu4e,
@@ -79,6 +80,7 @@
 
                     packageRequires = [
                       ebdb
+                      khalel
                       mu4e
                       org-vcard
                       tabspaces
@@ -105,7 +107,9 @@
                 };
               in
               {
-                emacsPackagesFor = emacs: (emacsPackagesFor emacs).overrideScope scope;
+                emacsPackagesFor =
+                  emacs:
+                  (emacsPackagesFor emacs).overrideScope scope;
               };
           };
         };
