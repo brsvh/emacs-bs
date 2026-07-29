@@ -4,7 +4,6 @@
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
-;; Package-Requires: ((emacs "30.1") (khalel "0.1.16"))
 ;; Version: 0.1.0
 
 ;; This file is not part of GNU Emacs.

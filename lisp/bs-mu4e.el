@@ -4,7 +4,6 @@
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
-;; Package-Requires: ((ebdb "0.8.22") (emacs "30.1") (mu4e "1.14.2"))
 ;; Version: 0.1.0
 
 ;; This file is not part of GNU Emacs.

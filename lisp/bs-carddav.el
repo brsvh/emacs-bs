@@ -4,7 +4,6 @@
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
-;; Package-Requires: ((emacs "30.1") (ebdb "0.8.22") (org-vcard "0.3.1"))
 ;; Version: 0.1.0
 
 ;; This file is not part of GNU Emacs.
