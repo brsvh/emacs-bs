@@ -38,48 +38,6 @@
   :prefix "bs-"
   :group 'emacs)
 
-(defvar ctl-c-4-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c 4'.")
-
-(defvar ctl-c-5-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c 5'.")
-
-(defvar ctl-c-a-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c a'.")
-
-(defvar ctl-c-c-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c c'.")
-
-(defvar ctl-c-f-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c f'.")
-
-(defvar ctl-c-home-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c <home>'.")
-
-(defvar ctl-c-n-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c n'.")
-
-(defvar ctl-c-p-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c p'.")
-
-(defvar ctl-c-s-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c s'.")
-
-(defvar ctl-c-t-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c t'.")
-
-(defvar ctl-c-v-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c v'.")
-
-(defvar ctl-c-w-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c w'.")
-
-(defvar ctl-c-x-map (make-keymap)
-  "Keymap for sub-commands of \\`C-c x'.")
-
-(defvar ctl-c-map (make-keymap)
-  "Default Keymap for \\`C-c' commands.")
-
 (defcustom bs-cache-directory (bs-path (bs-getenv "XDG_CACHE_HOME"
                                                   "~/.cache")
                                        "emacs/")
@@ -171,6 +129,48 @@ The BUFFER must be saved in a file."
 
 ;;;###autoload
 (progn
+  (defvar ctl-c-4-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c 4'.")
+
+  (defvar ctl-c-5-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c 5'.")
+
+  (defvar ctl-c-a-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c a'.")
+
+  (defvar ctl-c-c-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c c'.")
+
+  (defvar ctl-c-f-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c f'.")
+
+  (defvar ctl-c-home-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c <home>'.")
+
+  (defvar ctl-c-n-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c n'.")
+
+  (defvar ctl-c-p-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c p'.")
+
+  (defvar ctl-c-s-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c s'.")
+
+  (defvar ctl-c-t-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c t'.")
+
+  (defvar ctl-c-v-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c v'.")
+
+  (defvar ctl-c-w-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c w'.")
+
+  (defvar ctl-c-x-map (make-keymap)
+    "Keymap for sub-commands of \\`C-c x'.")
+
+  (defvar ctl-c-map (make-keymap)
+    "Default Keymap for \\`C-c' commands.")
+
   ;; Establish a structured \\`C-c' prefix hierarchy to group related
   ;; commands under stable, mnemonic sub-maps. This keeps custom key
   ;; bindings discoverable, avoids collisions, and scales as new
