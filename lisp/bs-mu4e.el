@@ -44,6 +44,8 @@
 (declare-function mu4e-get-view-buffer "mu4e-buffer" (&optional headers-buffer create))
 (declare-function mu4e-get-view-buffers "mu4e-buffer" (&optional mapfunc))
 (declare-function mu4e-headers-goto-message-id "mu4e-headers" (msgid))
+(declare-function mu4e-headers-next "mu4e-headers" (&optional n))
+(declare-function mu4e-headers-prev "mu4e-headers" (&optional n))
 (declare-function mu4e-headers-view-message "mu4e-headers" ())
 (declare-function mu4e-mark-at-point "mu4e-mark" (mark target))
 (declare-function mu4e-mark-docid-marked-p "mu4e-mark" (docid))
@@ -419,6 +421,8 @@ delegates all other fields to FUNCTION."
 
 (defconst bs-mu4e--headers-required-functions
   '(mu4e-get-headers-buffer
+    mu4e-headers-next
+    mu4e-headers-prev
     mu4e-message-at-point
     mu4e-message-field
     mu4e-personal-address-p
@@ -913,6 +917,13 @@ Right-align its message-count label to COUNT-WIDTH columns."
     (move-to-column 2)
     (mu4e~headers-docid-at-point)))
 
+(defun bs-mu4e--headers-synchronize-window-points ()
+  "Set windows displaying the current headers buffer to point."
+  (let ((buffer (current-buffer))
+        (position (point)))
+    (dolist (window (get-buffer-window-list buffer nil t))
+      (set-window-point window position))))
+
 (defun bs-mu4e--headers-restore-selection (docid)
   "Restore point and highlighting to DOCID, or the first message."
   (let ((docid (and docid
@@ -923,6 +934,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
     (when docid
       (beginning-of-line)
       (move-to-column 2)
+      (bs-mu4e--headers-synchronize-window-points)
       (mu4e~headers-highlight docid))
     docid))
 
@@ -1202,6 +1214,20 @@ also refreshes a view buffer showing MSG."
       (bs-mu4e--headers-remove-handler docid)
     (funcall function docid)))
 
+(defun bs-mu4e--headers-next-advice (function &optional count)
+  "Move by COUNT custom message rows, or call FUNCTION."
+  (if (bs-mu4e--headers-model-active-p)
+      (bs-mu4e--headers-move-in-context
+       (prefix-numeric-value (or count 1)))
+    (funcall function count)))
+
+(defun bs-mu4e--headers-previous-advice (function &optional count)
+  "Move backwards by COUNT custom message rows, or call FUNCTION."
+  (if (bs-mu4e--headers-model-active-p)
+      (bs-mu4e--headers-move-in-context
+       (- (prefix-numeric-value (or count 1))))
+    (funcall function count)))
+
 (defun bs-mu4e--headers-next-message-position (backwards)
   "Return the next concrete message position.
 
@@ -1234,28 +1260,44 @@ Search backwards when BACKWARDS is non-nil."
     (when docid
       (beginning-of-line)
       (move-to-column 2)
-      (walk-windows
-       (lambda (window)
-         (when (eq (window-buffer window) (current-buffer))
-           (set-window-point window (point))))
-       nil t)
+      (bs-mu4e--headers-synchronize-window-points)
       (when (and mu4e-headers-open-after-move
                  (window-live-p mu4e~headers-view-win))
         (mu4e-headers-view-message))
       (mu4e~headers-highlight docid))
     docid))
 
+(defun bs-mu4e--headers-move-in-context (count)
+  "Move COUNT message rows from a headers or message view buffer."
+  (if (eq major-mode 'mu4e-headers-mode)
+      (bs-mu4e--headers-move count)
+    (let* ((msg (mu4e-message-at-point 'noerror))
+           (buffer (mu4e-get-headers-buffer))
+           (docid (and msg (mu4e-message-field msg :docid)))
+           (message-id (and msg
+                            (mu4e-message-field msg :message-id))))
+      (unless (and (buffer-live-p buffer) docid)
+        (user-error "Action is not possible"))
+      (with-selected-window
+          (or (get-buffer-window buffer) (selected-window))
+        (with-current-buffer buffer
+          (if (or (mu4e~headers-goto-docid docid)
+                  (and message-id
+                       (mu4e-headers-goto-message-id message-id)))
+              (bs-mu4e--headers-move count)
+            (user-error "Cannot find message in headers buffer")))))))
+
 ;;;###autoload
 (defun bs-mu4e-headers-next (&optional count)
   "Move to the COUNTth next concrete message row."
   (interactive "p")
-  (bs-mu4e--headers-move (or count 1)))
+  (bs-mu4e--headers-move-in-context (or count 1)))
 
 ;;;###autoload
 (defun bs-mu4e-headers-previous (&optional count)
   "Move to the COUNTth previous concrete message row."
   (interactive "p")
-  (bs-mu4e--headers-move (- (or count 1))))
+  (bs-mu4e--headers-move-in-context (- (or count 1))))
 
 ;;;###autoload
 (defun bs-mu4e-headers-fold-toggle ()
@@ -1367,6 +1409,10 @@ Search backwards when BACKWARDS is non-nil."
      'mu4e~headers-update-handler #'bs-mu4e--headers-update-advice)
     (bs-mu4e-add-around-advice
      'mu4e~headers-remove-handler #'bs-mu4e--headers-remove-advice)
+    (bs-mu4e-add-around-advice
+     'mu4e-headers-next #'bs-mu4e--headers-next-advice)
+    (bs-mu4e-add-around-advice
+     'mu4e-headers-prev #'bs-mu4e--headers-previous-advice)
     (bs-mu4e--headers-install-bindings)
     (add-hook 'window-size-change-functions
               #'bs-mu4e--headers-window-size-change)
@@ -1394,6 +1440,10 @@ This is an emergency and debugging command, not a minor mode."
                    #'bs-mu4e--headers-update-advice)
     (advice-remove 'mu4e~headers-remove-handler
                    #'bs-mu4e--headers-remove-advice)
+    (advice-remove 'mu4e-headers-next
+                   #'bs-mu4e--headers-next-advice)
+    (advice-remove 'mu4e-headers-prev
+                   #'bs-mu4e--headers-previous-advice)
     (bs-mu4e--headers-restore-bindings)
     (remove-hook 'window-size-change-functions
                  #'bs-mu4e--headers-window-size-change)
