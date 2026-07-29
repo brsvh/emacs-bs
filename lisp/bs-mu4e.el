@@ -108,6 +108,11 @@
   "Face for thread title lines."
   :group 'bs-mu4e)
 
+(defface bs-mu4e-headers-correspondent-face
+  '((t :inherit mu4e-header-face :slant italic))
+  "Face for message correspondents in thread listings."
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-headers-thread-count-digits 4
   "Minimum decimal digits reserved for thread message counts."
   :type 'natnum
@@ -612,17 +617,20 @@ Right-align its message-count label to COUNT-WIDTH columns."
          (date (concat (mu4e~headers-field-value msg :human-date) " "))
          (correspondent (bs-mu4e--headers-correspondent msg))
          (correspondent-width
-          (min
-           (bs-mu4e--headers-field-width :from 24)
-           (max 0
-                (- width
-                   (string-width mu4e--mark-fringe)
-                   flags-width
-                   (string-width prefix)
-                   (string-width date)
-                   2))))
-         (correspondent (bs-mu4e--headers-fit
+          (max 0
+               (- width
+                  (string-width mu4e--mark-fringe)
+                  flags-width
+                  (string-width prefix)
+                  (string-width date)
+                  2)))
+         (correspondent (bs-mu4e--headers-truncate
                          correspondent correspondent-width))
+         (correspondent-start
+          (+ (length mu4e--mark-fringe)
+             (length flags)
+             (length prefix)
+             1))
          (left (concat mu4e--mark-fringe
                        flags
                        " "
@@ -635,6 +643,11 @@ Right-align its message-count label to COUNT-WIDTH columns."
          (visible (concat left (make-string padding ?\s) date))
          (visible (mu4e~headers-apply-flags msg visible))
          (docid (mu4e-message-field msg :docid)))
+    (unless (string-empty-p correspondent)
+      (add-face-text-property
+       correspondent-start
+       (+ correspondent-start (length correspondent))
+       'bs-mu4e-headers-correspondent-face t visible))
     (propertize
      (concat (mu4e~headers-docid-cookie docid) visible "\n")
      'docid docid
