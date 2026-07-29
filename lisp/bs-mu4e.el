@@ -145,7 +145,7 @@
 
 (defface bs-mu4e-headers-timestamp-face
   '((t :inherit (shadow bs-mu4e-headers-label-face)
-       :weight regular))
+       :weight normal :slant normal :strike-through nil))
   "Face for message timestamps."
   :group 'bs-mu4e)
 
