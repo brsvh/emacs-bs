@@ -103,6 +103,11 @@
   "Personal mu4e extensions."
   :group 'mu4e)
 
+(defface bs-mu4e-headers-title-face
+  '((t :inherit mu4e-header-title-face :weight bold))
+  "Face for thread title lines."
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-headers-thread-count-digits 4
   "Minimum decimal digits reserved for thread message counts."
   :type 'natnum
@@ -596,7 +601,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
                               (string-width tags))))))
     (propertize
      (concat left (make-string padding ?\s) tags)
-     'face 'mu4e-header-title-face)))
+     'face 'bs-mu4e-headers-title-face)))
 
 (defun bs-mu4e--headers-message-line (msg prefix width)
   "Return a rendered message line for MSG with PREFIX at WIDTH."
