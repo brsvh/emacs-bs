@@ -30,6 +30,7 @@
 
 ;;; Code:
 
+(require 'bs-ext)
 (require 'khalel)
 (require 'org-capture)
 
@@ -46,9 +47,30 @@
                  string)
   :group 'bs-khal)
 
+(defcustom bs-khal-calendar-directories nil
+  "Directories containing calendar files read by khal."
+  :type '(repeat directory)
+  :group 'bs-khal)
+
 (defcustom bs-khal-import-buffer-name "*bs-khal-import*"
   "Name of the buffer used by the background import process."
   :type 'string
+  :group 'bs-khal)
+
+(defcustom bs-khal-import-check-interval nil
+  "Seconds between checks for calendar source changes.
+
+When nil or non-positive, do not check periodically.  A check is
+inexpensive and starts a full background import only when a calendar
+file changed or the local date advanced."
+  :type '(choice (const :tag "Do not check periodically" nil)
+                 number)
+  :group 'bs-khal)
+
+(defcustom bs-khal-import-state-file
+  (bs-path bs-state-directory "bs-khal-import-state")
+  "File in which to persist the last successful import state."
+  :type 'file
   :group 'bs-khal)
 
 (defvar bs-khal--import-process nil
@@ -56,6 +78,15 @@
 
 (defvar bs-khal--import-pending nil
   "Whether another import should run after the current one.")
+
+(defvar bs-khal--import-source-state nil
+  "Calendar source state captured for the current import.")
+
+(defvar bs-khal--last-import-state nil
+  "Calendar source state captured for the last successful import.")
+
+(defvar bs-khal--import-check-timer nil
+  "Timer used to check whether calendar sources changed.")
 
 (defun bs-khal--emacs-program ()
   "Return the Emacs executable used for background imports."
@@ -89,6 +120,48 @@
           "--eval"
           (prin1-to-string (bs-khal--worker-form)))))
 
+(defun bs-khal--source-state ()
+  "Return a digest of the calendar sources and local date."
+  (let (files)
+    (dolist (directory bs-khal-calendar-directories)
+      (when (file-directory-p directory)
+        (setq files
+              (nconc files
+                     (ignore-errors
+                       (directory-files-recursively
+                        directory "\\.ics\\'"))))))
+    (secure-hash
+     'sha256
+     (prin1-to-string
+      (list
+       1
+       (format-time-string "%Y-%m-%d")
+       (delq
+        nil
+        (mapcar
+         (lambda (file)
+           (when-let* ((attributes
+                        (ignore-errors (file-attributes file))))
+             (list file
+                   (file-attribute-size attributes)
+                   (file-attribute-modification-time attributes))))
+         (delete-dups (sort files #'string-lessp)))))))))
+
+(defun bs-khal--read-import-state ()
+  "Return the persisted state of the last successful import."
+  (when (file-readable-p bs-khal-import-state-file)
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents bs-khal-import-state-file)
+          (read (current-buffer)))
+      (error nil))))
+
+(defun bs-khal--write-import-state (state)
+  "Persist successful import STATE."
+  (make-directory (file-name-directory bs-khal-import-state-file) t)
+  (with-temp-file bs-khal-import-state-file
+    (prin1 state (current-buffer))))
+
 (defun bs-khal--refresh-buffers ()
   "Refresh buffers that display the imported calendar data."
   (when-let* ((buffer (find-buffer-visiting
@@ -110,12 +183,17 @@
   (when (memq (process-status process) '(exit signal))
     (let ((buffer (process-buffer process))
           (pending bs-khal--import-pending)
+          (source-state bs-khal--import-source-state)
           (success (and (eq (process-status process) 'exit)
                         (zerop (process-exit-status process)))))
       (setq bs-khal--import-pending nil
-            bs-khal--import-process nil)
+            bs-khal--import-process nil
+            bs-khal--import-source-state nil)
       (if success
           (progn
+            (setq bs-khal--last-import-state source-state)
+            (with-demoted-errors "Could not persist calendar state: %S"
+              (bs-khal--write-import-state source-state))
             (bs-khal--refresh-buffers)
             (when (buffer-live-p buffer)
               (kill-buffer buffer))
@@ -143,7 +221,8 @@ that changes which arrive during the current run are not lost."
     (let ((buffer (get-buffer-create bs-khal-import-buffer-name)))
       (with-current-buffer buffer
         (erase-buffer))
-      (setq bs-khal--import-process
+      (setq bs-khal--import-source-state (bs-khal--source-state)
+            bs-khal--import-process
             (make-process
              :name "bs-khal-import"
              :buffer buffer
@@ -154,6 +233,28 @@ that changes which arrive during the current run are not lost."
              :stderr buffer))
       (message "Calendar import started in the background")))
   bs-khal--import-process)
+
+(defun bs-khal--import-if-changed ()
+  "Import calendar events when their source state changed."
+  (when bs-khal-calendar-directories
+    (let ((source-state (bs-khal--source-state)))
+      (when (or (not (file-readable-p khalel-import-org-file))
+                (not (equal source-state bs-khal--last-import-state)))
+        (bs-khal-import-events)))))
+
+(defun bs-khal--setup-import-check-timer ()
+  "Configure the periodic calendar source check timer."
+  (when (timerp bs-khal--import-check-timer)
+    (cancel-timer bs-khal--import-check-timer))
+  (setq bs-khal--import-check-timer nil
+        bs-khal--last-import-state (bs-khal--read-import-state))
+  (when (and bs-khal-calendar-directories
+             (numberp bs-khal-import-check-interval)
+             (> bs-khal-import-check-interval 0))
+    (setq bs-khal--import-check-timer
+          (run-at-time bs-khal-import-check-interval
+                       bs-khal-import-check-interval
+                       #'bs-khal--import-if-changed))))
 
 ;;;###autoload
 (defun bs-khal-capture ()
@@ -195,6 +296,8 @@ Return SUCCESS unchanged for the advised Khalel function."
   (when bs-khal-default-calendar
     (setq khalel-default-calendar bs-khal-default-calendar))
   (khalel-add-capture-template)
+  (bs-khal--setup-import-check-timer)
+  (bs-khal--import-if-changed)
   (unless (advice-member-p
            #'bs-khal--after-export
            'khalel-export-org-subtree-to-calendar)
