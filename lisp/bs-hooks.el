@@ -37,7 +37,7 @@
 
 ;;; Code:
 
-(require 'project)
+(declare-function project-current "project" (&optional maybe-prompt directory))
 
 (defvar bs-after-init-final-hook nil
   "Normal hook run at the end of `after-init-hook'.")
