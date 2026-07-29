@@ -113,6 +113,11 @@
   "Face for message correspondents in thread listings."
   :group 'bs-mu4e)
 
+(defface bs-mu4e-headers-unread-correspondent-face
+  '((t :inherit default :weight bold :slant italic))
+  "Face for correspondents of unread messages."
+  :group 'bs-mu4e)
+
 (defface bs-mu4e-headers-label-face
   '((t :inherit mu4e-header-face :weight regular :underline nil))
   "Parent face for labels in thread listings."
@@ -122,6 +127,12 @@
   '((t :inherit (font-lock-keyword-face bs-mu4e-headers-label-face)
        :weight semibold :inverse-video t))
   "Face for thread message-count labels."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-unread-thread-count-face
+  '((t :inherit (error bs-mu4e-headers-label-face)
+       :weight semibold :inverse-video t))
+  "Face for thread message-count labels containing unread messages."
   :group 'bs-mu4e)
 
 (defface bs-mu4e-headers-tag-face
@@ -629,13 +640,19 @@ or only the total otherwise.  Append `+' when the thread is
 incomplete."
   (let* ((messages (plist-get thread :messages))
          (total (length messages))
-         (unread (cl-count-if #'bs-mu4e--headers-unread-p messages))
+         (unread (bs-mu4e--headers-thread-unread-count thread))
          (count (if (> unread 0)
                     (format "%d/%d" unread total)
                   (number-to-string total))))
     (format "%s%s"
             count
             (if (plist-get thread :complete) "" "+"))))
+
+(defun bs-mu4e--headers-thread-unread-count (thread)
+  "Return the number of unread messages in THREAD."
+  (cl-count-if
+   #'bs-mu4e--headers-unread-p
+   (plist-get thread :messages)))
 
 (defun bs-mu4e--headers-thread-count-width ()
   "Return the widest message-count label in the current headers model."
@@ -656,14 +673,18 @@ Right-align its message-count label to COUNT-WIDTH columns."
          (padding-width
           (max 0.0
                (min 0.5 bs-mu4e-headers-thread-count-padding)))
+         (count-face
+          (if (> (bs-mu4e--headers-thread-unread-count thread) 0)
+              'bs-mu4e-headers-unread-thread-count-face
+            'bs-mu4e-headers-thread-count-face))
          (count-padding
           (bs-mu4e--headers-space
-           padding-width 'bs-mu4e-headers-thread-count-face))
+           padding-width count-face))
          (count-gap (bs-mu4e--headers-space 1))
          (count-label
           (propertize
            (bs-mu4e--headers-thread-count-label thread)
-           'font-lock-face 'bs-mu4e-headers-thread-count-face))
+           'font-lock-face count-face))
          (count (concat
                  (make-string
                   (max 0 (- count-width (string-width count-label)))
@@ -744,11 +765,17 @@ Right-align its message-count label to COUNT-WIDTH columns."
            (mu4e~headers-apply-flags msg visible)))
          (docid (mu4e-message-field msg :docid)))
     (unless (string-empty-p correspondent)
-      (font-lock-append-text-property
-       correspondent-start
-       (+ correspondent-start (length correspondent))
-       'font-lock-face
-       'bs-mu4e-headers-correspondent-face visible))
+      (let ((correspondent-end
+             (+ correspondent-start (length correspondent))))
+        (if (bs-mu4e--headers-unread-p msg)
+            (font-lock-prepend-text-property
+             correspondent-start correspondent-end
+             'font-lock-face
+             'bs-mu4e-headers-unread-correspondent-face visible)
+          (font-lock-append-text-property
+           correspondent-start correspondent-end
+           'font-lock-face
+           'bs-mu4e-headers-correspondent-face visible))))
     (font-lock-prepend-text-property
      (- (length visible) (length date) 1)
      (length visible)
