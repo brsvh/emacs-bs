@@ -31,10 +31,9 @@
 (require 'mail-parse)
 (require 'subr-x)
 
-(declare-function ebdb-complete-keybinding-setup "ebdb-complete")
-(declare-function ebdb-dwim-mail "ebdb" (record &optional mail))
-(declare-function ebdb-record-mail "ebdb" (record &optional no-roles label defunct))
 (declare-function message-tab "message" ())
+(declare-function bs-contacts-mail-completion-set "bs-contacts"
+                  (&optional mu4e-contacts-set))
 (declare-function mu4e--modeline-update "mu4e-modeline" ())
 (declare-function mu4e--compose-complete-handler "mu4e-compose" (str pred action))
 (declare-function mu4e-contact-email "mu4e-contacts")
@@ -64,11 +63,6 @@
 (declare-function mu4e~headers-human-date "mu4e-headers" (msg))
 (declare-function mu4e~headers-thread-prefix "mu4e-headers" (thread))
 
-(defvar ebdb-after-read-db-hook)
-(defvar ebdb-dwim-completion-cache)
-(defvar ebdb-mode-hook)
-(defvar ebdb-mode-map)
-(defvar ebdb-record-tracker)
 (defvar mail-mode-map)
 (defvar message-completion-alist)
 (defvar message-mode-map)
@@ -157,7 +151,7 @@
   :type 'number
   :group 'bs-mu4e)
 
-(defcustom bs-mu4e-ebdb-ignored-local-part-regexp
+(defcustom bs-mu4e-ignored-local-part-regexp
   (concat
    "\\`\\(?:"
    "abuse\\|alerts?\\|announcements?\\|automated\\|autoreply\\|"
@@ -170,7 +164,7 @@
    "undisclosedrecipients\\|unsubscribe\\|updates?\\|"
    "verif\\(?:y\\|ication\\)"
    "\\)\\'")
-  "Regexp matching compact email local parts ignored by EBDB completion.
+  "Regexp matching compact email local parts ignored by mail completion.
 
 The local part is lower-cased, truncated before a plus tag, and
 then stripped of dots, dashes, and underscores before matching.
@@ -179,7 +173,7 @@ not every role-based mailbox such as support or info."
   :type 'regexp
   :group 'bs-mu4e)
 
-(defcustom bs-mu4e-ebdb-ignored-display-name-regexp
+(defcustom bs-mu4e-ignored-display-name-regexp
   (regexp-opt
    '("auto generated"
      "alert"
@@ -198,7 +192,7 @@ not every role-based mailbox such as support or info."
      "unsubscribe"
      "verification")
    'words)
-  "Regexp matching display names ignored by EBDB completion."
+  "Regexp matching display names ignored by mail completion."
   :type 'regexp
   :group 'bs-mu4e)
 
@@ -277,15 +271,11 @@ removed, and bare email names fall back to the email address alone."
                     (bs-mu4e-trim-contact-name (cdr parsed))))
          (local-part (bs-mu4e-email-compact-local-part email)))
     (or (and local-part
-             (string-match-p bs-mu4e-ebdb-ignored-local-part-regexp
+             (string-match-p bs-mu4e-ignored-local-part-regexp
                              local-part))
         (and name
-             (string-match-p bs-mu4e-ebdb-ignored-display-name-regexp
+             (string-match-p bs-mu4e-ignored-display-name-regexp
                              (downcase name))))))
-
-(defun bs-mu4e-ebdb-dwim-mail (function record &optional mail)
-  "Call FUNCTION for EBDB RECORD MAIL and normalize the display name."
-  (bs-mu4e-clean-mail-address (funcall function record mail)))
 
 (defun bs-mu4e-completion-candidate (candidate)
   "Return normalized CANDIDATE, or nil when it should be hidden."
@@ -294,8 +284,8 @@ removed, and bare email names fall back to the email address alone."
       (unless (bs-mu4e-ignored-mail-address-p candidate)
         candidate))))
 
-(defun bs-mu4e-mu4e-contact-completion-set ()
-  "Return a cleaned copy of `mu4e--contacts-set' for completion."
+(defun bs-mu4e--clean-mu4e-contact-completion-set ()
+  "Return a cleaned copy of `mu4e--contacts-set'."
   (when (and (boundp 'mu4e--contacts-set)
              (hash-table-p mu4e--contacts-set))
     (let ((contacts (make-hash-table
@@ -303,10 +293,27 @@ removed, and bare email names fall back to the email address alone."
                      :size (hash-table-count mu4e--contacts-set))))
       (maphash
        (lambda (candidate _value)
-         (when-let* ((candidate (bs-mu4e-completion-candidate candidate)))
+         (when-let* ((candidate
+                      (bs-mu4e-completion-candidate candidate)))
            (puthash candidate t contacts)))
        mu4e--contacts-set)
       contacts)))
+
+(defun bs-mu4e-mu4e-contact-completion-set ()
+  "Return khard and mu4e contacts merged for mail completion.
+
+If the khard backend is unavailable or fails, report the problem and
+return cleaned mu4e history candidates instead."
+  (unless (fboundp 'bs-contacts-mail-completion-set)
+    (require 'bs-contacts nil t))
+  (if (not (fboundp 'bs-contacts-mail-completion-set))
+      (bs-mu4e--clean-mu4e-contact-completion-set)
+    (condition-case error-data
+        (bs-contacts-mail-completion-set mu4e--contacts-set)
+      (error
+       (message "Khard contacts unavailable; using mu4e history: %s"
+                (error-message-string error-data))
+       (bs-mu4e--clean-mu4e-contact-completion-set)))))
 
 (defun bs-mu4e-mu4e-compose-complete-handler (function str pred action)
   "Call Mu4e completion FUNCTION with STR, PRED, and ACTION.
@@ -317,65 +324,10 @@ Use cleaned contact candidates for the duration of the call."
              mu4e--contacts-set)))
     (funcall function str pred action)))
 
-(defun bs-mu4e-ebdb-mail-dwim-collection-function
-    (function str pred action)
-  "Call EBDB completion FUNCTION with STR, PRED, and ACTION.
-
-Use cleaned contact candidates for the duration of the call."
-  (let ((ebdb-dwim-completion-cache
-         (cl-loop for candidate in ebdb-dwim-completion-cache
-                  for cleaned = (bs-mu4e-completion-candidate candidate)
-                  when cleaned collect cleaned)))
-    (funcall function str pred action)))
-
-(defun bs-mu4e-ebdb-refresh-dwim-completion-cache (&optional _db)
-  "Rebuild EBDB mail completion candidates with bs-mu4e names."
-  (interactive)
-  (when (and (boundp 'ebdb-dwim-completion-cache)
-             (boundp 'ebdb-record-tracker))
-    (setq ebdb-dwim-completion-cache nil)
-    (dolist (record ebdb-record-tracker)
-      (dolist (mail (ebdb-record-mail record))
-        (let ((candidate (bs-mu4e-completion-candidate
-                          (ebdb-dwim-mail record mail))))
-          (when candidate
-            (cl-pushnew candidate
-                        ebdb-dwim-completion-cache
-                        :test #'equal)))))))
-
-(defun bs-mu4e-ebdb-complete-restore-standard-completion (&rest _)
-  "Keep EBDB Complete from bypassing CAPF in mail buffers."
-  (when (boundp 'ebdb-mode-hook)
-    (remove-hook 'ebdb-mode-hook #'ebdb-complete-keybinding-setup))
-  (when (boundp 'ebdb-mode-map)
-    (define-key ebdb-mode-map (kbd "q") #'quit-window))
-  (when (boundp 'message-completion-alist)
-    (setq message-completion-alist
-          (cl-remove 'ebdb-complete-mail message-completion-alist
-                     :key #'cdr :test #'eq)))
-  (when (boundp 'message-mode-map)
-    (define-key message-mode-map (kbd "TAB") #'message-tab))
-  (when (boundp 'mail-mode-map)
-    (define-key mail-mode-map (kbd "TAB") nil)))
-
 (defun bs-mu4e-add-around-advice (symbol function)
   "Add FUNCTION as around advice to SYMBOL unless already present."
   (unless (advice-member-p function symbol)
     (advice-add symbol :around function)))
-
-;;;###autoload
-(defun bs-mu4e-ebdb-enable ()
-  "Make EBDB mail completion candidates use bs-mu4e display names."
-  (interactive)
-  (with-eval-after-load 'ebdb
-    (bs-mu4e-add-around-advice 'ebdb-dwim-mail
-                               #'bs-mu4e-ebdb-dwim-mail)
-    (bs-mu4e-add-around-advice
-     'ebdb-mail-dwim-collection-function
-     #'bs-mu4e-ebdb-mail-dwim-collection-function)
-    (add-hook 'ebdb-after-read-db-hook
-              #'bs-mu4e-ebdb-refresh-dwim-completion-cache)
-    (bs-mu4e-ebdb-refresh-dwim-completion-cache)))
 
 ;;;###autoload
 (defun bs-mu4e-compose-completion-enable ()
@@ -385,17 +337,6 @@ Use cleaned contact candidates for the duration of the call."
     (bs-mu4e-add-around-advice
      'mu4e--compose-complete-handler
      #'bs-mu4e-mu4e-compose-complete-handler)))
-
-;;;###autoload
-(defun bs-mu4e-ebdb-complete-enable ()
-  "Keep EBDB Complete completion on standard mail buffer CAPF."
-  (interactive)
-  (with-eval-after-load 'ebdb-complete
-    (bs-mu4e-ebdb-complete-restore-standard-completion)
-    (unless (advice-member-p #'bs-mu4e-ebdb-complete-restore-standard-completion
-                             'ebdb-complete-enable)
-      (advice-add 'ebdb-complete-enable
-                  :after #'bs-mu4e-ebdb-complete-restore-standard-completion))))
 
 (defun bs-mu4e-headers-field-value (function msg field)
   "Format MSG FIELD, hiding email addresses embedded in From names.

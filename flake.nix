@@ -59,12 +59,10 @@
 
                 emacs-bs =
                   {
-                    ebdb,
                     khalel,
                     lib,
                     melpaBuild,
                     mu4e,
-                    org-vcard,
                     projectRoot,
                     tabspaces,
                     ...
@@ -79,10 +77,8 @@
                     files = ''("bs.el" "bs-*.el")'';
 
                     packageRequires = [
-                      ebdb
                       khalel
                       mu4e
-                      org-vcard
                       tabspaces
                     ];
 
