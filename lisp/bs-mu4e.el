@@ -51,6 +51,9 @@
 (declare-function mu4e-message-field "mu4e-message")
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
 (declare-function mu4e-search-rerun "mu4e-search" ())
+(declare-function mu4e--view-html-displayed-p "mu4e-view" ())
+(declare-function mu4e-action-view-in-browser
+                  "mu4e-view" (msg &optional skip-headers))
 (declare-function mu4e-view "mu4e-view" (msg))
 (declare-function mu4e~headers-apply-flags "mu4e-headers" (msg fieldval))
 (declare-function mu4e~headers-clear "mu4e-headers" (&optional text))
@@ -62,7 +65,13 @@
 (declare-function mu4e~headers-highlight "mu4e-headers" (docid))
 (declare-function mu4e~headers-human-date "mu4e-headers" (msg))
 (declare-function mu4e~headers-thread-prefix "mu4e-headers" (thread))
+(declare-function xwidget-at "xwidget" (pos))
+(declare-function xwidget-webkit-goto-uri
+                  "xwidget-internal" (xwidget uri))
+(declare-function xwidget-webkit-new-session "xwidget" (url))
 
+(defvar browse-url-browser-function)
+(defvar browse-url-handlers)
 (defvar mail-mode-map)
 (defvar message-completion-alist)
 (defvar message-mode-map)
@@ -87,11 +96,13 @@
 (defvar mu4e-search-threads)
 (defvar mu4e-update-func)
 (defvar mu4e-use-fancy-chars)
+(defvar mu4e-view-rendered-hook)
 (defvar mu4e~headers-hidden)
 (defvar mu4e~headers-docid-pre)
 (defvar mu4e~headers-thread-state)
 (defvar mu4e~headers-view-win)
 (defvar mu4e~highlighted-docid)
+(defvar xwidget-webkit-last-session-buffer)
 
 (defgroup bs-mu4e nil
   "Personal mu4e extensions."
@@ -204,6 +215,24 @@ The first matching regexp is reported by
 `bs-mu4e-contact-ignore-reasons'."
   :type '(repeat regexp)
   :group 'bs-mu4e)
+
+(defvar bs-mu4e--view-xwidget-enabled nil
+  "Non-nil when displayed Mu4e HTML opens automatically in Xwidget.")
+
+(defvar bs-mu4e--view-xwidget-buffer nil
+  "Dedicated Xwidget buffer used to render Mu4e HTML.")
+
+(defvar bs-mu4e--view-xwidget-opening-source nil
+  "Mu4e View buffer currently opening HTML in Xwidget.")
+
+(defvar-local bs-mu4e--view-xwidget-local-map nil
+  "Mu4e keymap installed in the current dedicated Xwidget buffer.")
+
+(defvar-local bs-mu4e--view-xwidget-original-local-map nil
+  "Original local keymap of the current dedicated Xwidget buffer.")
+
+(defvar-local bs-mu4e--view-xwidget-source nil
+  "Mu4e View buffer rendered by the current dedicated Xwidget buffer.")
 
 (defun bs-mu4e-email-address-p (string)
   "Return non-nil when STRING is a bare email address."
@@ -372,6 +401,166 @@ Use cleaned contact candidates for the duration of the call."
     (bs-mu4e-add-around-advice
      'mu4e--compose-complete-handler
      #'bs-mu4e-mu4e-compose-complete-handler)))
+
+(defun bs-mu4e--view-xwidget-available-p ()
+  "Return non-nil when this Emacs can display WebKit Xwidgets."
+  (featurep 'xwidget-internal))
+
+(defun bs-mu4e--view-xwidget-keymap-value (value)
+  "Return the keymap represented by VALUE, or nil."
+  (cond
+   ((keymapp value) value)
+   ((and (symbolp value)
+         (boundp value)
+         (keymapp (symbol-value value)))
+    (symbol-value value))))
+
+(defun bs-mu4e--view-xwidget-keymap (source)
+  "Return active Mu4e View keymaps from SOURCE as one keymap."
+  (with-current-buffer source
+    (make-composed-keymap
+     (append
+      (cl-loop
+       for (mode . value) in minor-mode-map-alist
+       for keymap = (bs-mu4e--view-xwidget-keymap-value value)
+       when (and (symbolp mode)
+                 (string-prefix-p "mu4e-" (symbol-name mode))
+                 (boundp mode)
+                 (symbol-value mode)
+                 keymap)
+       collect keymap)
+      (list (current-local-map))))))
+
+(defun bs-mu4e--view-xwidget-detach ()
+  "Restore the current Xwidget buffer's native command map."
+  (remove-hook 'pre-command-hook
+               #'bs-mu4e--view-xwidget-redirect-command t)
+  (when bs-mu4e--view-xwidget-original-local-map
+    (use-local-map bs-mu4e--view-xwidget-original-local-map))
+  (setq bs-mu4e--view-xwidget-local-map nil
+        bs-mu4e--view-xwidget-original-local-map nil
+        bs-mu4e--view-xwidget-source nil))
+
+(defun bs-mu4e--view-xwidget-redirect-command ()
+  "Run a bridged Mu4e command in its associated View buffer."
+  (if (not (buffer-live-p bs-mu4e--view-xwidget-source))
+      (progn
+        (bs-mu4e--view-xwidget-detach)
+        (user-error "The associated Mu4e View buffer is no longer live"))
+    (let* ((keys (this-command-keys-vector))
+           (local-command
+            (lookup-key bs-mu4e--view-xwidget-local-map keys))
+           (source-command
+            (with-current-buffer bs-mu4e--view-xwidget-source
+              (key-binding keys t))))
+      (when (and (commandp local-command)
+                 (eq this-command source-command))
+        (switch-to-buffer bs-mu4e--view-xwidget-source)))))
+
+(defun bs-mu4e--view-xwidget-attach (buffer source)
+  "Use BUFFER only to render HTML for Mu4e View buffer SOURCE."
+  (with-current-buffer buffer
+    (unless bs-mu4e--view-xwidget-original-local-map
+      (setq bs-mu4e--view-xwidget-original-local-map
+            (current-local-map)))
+    (setq bs-mu4e--view-xwidget-source source
+          bs-mu4e--view-xwidget-local-map
+          (bs-mu4e--view-xwidget-keymap source))
+    (use-local-map bs-mu4e--view-xwidget-local-map)
+    (add-hook 'pre-command-hook
+              #'bs-mu4e--view-xwidget-redirect-command nil t)))
+
+(defun bs-mu4e--view-xwidget-browse-url (url &optional _new-window)
+  "Render URL in the dedicated Mu4e Xwidget buffer."
+  (require 'xwidget)
+  (let ((last-session
+         (and (not (eq xwidget-webkit-last-session-buffer
+                       bs-mu4e--view-xwidget-buffer))
+              xwidget-webkit-last-session-buffer))
+        (buffer
+         (and (buffer-live-p bs-mu4e--view-xwidget-buffer)
+              bs-mu4e--view-xwidget-buffer)))
+    (unwind-protect
+        (let ((xwidget
+               (and buffer
+                    (with-current-buffer buffer
+                      (xwidget-at (point-min))))))
+          (if xwidget
+              (progn
+                (switch-to-buffer buffer)
+                (xwidget-webkit-goto-uri xwidget url))
+            (when buffer
+              (with-current-buffer buffer
+                (bs-mu4e--view-xwidget-detach)))
+            (setq xwidget-webkit-last-session-buffer nil)
+            (xwidget-webkit-new-session url)
+            (setq buffer (current-buffer)
+                  bs-mu4e--view-xwidget-buffer buffer))
+          (when (buffer-live-p bs-mu4e--view-xwidget-opening-source)
+            (bs-mu4e--view-xwidget-attach
+             buffer bs-mu4e--view-xwidget-opening-source))
+          buffer)
+      (setq xwidget-webkit-last-session-buffer last-session))))
+
+(defun bs-mu4e--view-open-html-in-xwidget ()
+  "Open the displayed Mu4e HTML alternative in an Xwidget."
+  (when (and bs-mu4e--view-xwidget-enabled
+             (derived-mode-p 'mu4e-view-mode)
+             (bs-mu4e--view-xwidget-available-p)
+             (mu4e--view-html-displayed-p)
+             mu4e--view-message)
+    (condition-case error-data
+        (let ((bs-mu4e--view-xwidget-opening-source
+               (current-buffer))
+              (browse-url-handlers nil)
+              (browse-url-browser-function
+               #'bs-mu4e--view-xwidget-browse-url))
+          (mu4e-action-view-in-browser mu4e--view-message))
+      (error
+       (display-warning
+        'bs-mu4e
+        (format "Unable to open Mu4e HTML in Xwidget: %s"
+                (error-message-string error-data))
+        :warning)))))
+
+(defun bs-mu4e--view-after-toggle-html (&rest _arguments)
+  "Open Xwidget after a Mu4e View command switches to HTML."
+  (bs-mu4e--view-open-html-in-xwidget))
+
+(defun bs-mu4e--view-xwidget-install ()
+  "Install automatic Xwidget display for Mu4e HTML views."
+  (remove-hook 'mu4e-view-rendered-hook
+               #'bs-mu4e--view-open-html-in-xwidget)
+  (add-hook 'mu4e-view-rendered-hook
+            #'bs-mu4e--view-open-html-in-xwidget t)
+  (unless (advice-member-p
+           #'bs-mu4e--view-after-toggle-html
+           'mu4e-view-toggle-html)
+    (advice-add 'mu4e-view-toggle-html
+                :after #'bs-mu4e--view-after-toggle-html)))
+
+;;;###autoload
+(defun bs-mu4e-view-xwidget-disable ()
+  "Stop opening displayed Mu4e HTML automatically in Xwidget."
+  (interactive)
+  (setq bs-mu4e--view-xwidget-enabled nil)
+  (when (buffer-live-p bs-mu4e--view-xwidget-buffer)
+    (with-current-buffer bs-mu4e--view-xwidget-buffer
+      (bs-mu4e--view-xwidget-detach)))
+  (when (featurep 'mu4e-view)
+    (remove-hook 'mu4e-view-rendered-hook
+                 #'bs-mu4e--view-open-html-in-xwidget)
+    (advice-remove 'mu4e-view-toggle-html
+                   #'bs-mu4e--view-after-toggle-html)))
+
+;;;###autoload
+(defun bs-mu4e-view-xwidget-enable ()
+  "Open displayed Mu4e HTML automatically when Xwidget is available."
+  (interactive)
+  (setq bs-mu4e--view-xwidget-enabled t)
+  (with-eval-after-load 'mu4e-view
+    (when bs-mu4e--view-xwidget-enabled
+      (bs-mu4e--view-xwidget-install))))
 
 (defun bs-mu4e-headers-field-value (function msg field)
   "Format MSG FIELD, hiding email addresses embedded in From names.
