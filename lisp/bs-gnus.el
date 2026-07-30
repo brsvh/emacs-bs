@@ -458,7 +458,7 @@ VISIBLE says whether the topic is expanded."
       (when-let* ((face
                    (bs-gnus--group-topic-level-face level)))
         (add-face-text-property
-         0
+         (length prefix)
          (if (zerop level)
              (+ (length prefix) (length title))
            (length line))
