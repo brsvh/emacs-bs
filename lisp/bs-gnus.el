@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'gnus)
 (require 'mail-parse)
 (require 'subr-x)
 
@@ -37,8 +38,6 @@
 (declare-function mail-header-number "nnheader" (header))
 (declare-function mail-header-references "nnheader" (header))
 (declare-function mail-header-subject "nnheader" (header))
-(declare-function gnus-active "gnus-start" (group))
-(declare-function gnus-group-entry "gnus-start" (group))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
 (declare-function gnus-data-header "gnus-sum" (data))
 (declare-function gnus-data-level "gnus-sum" (data))
