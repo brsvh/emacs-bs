@@ -44,6 +44,9 @@
 (declare-function gnus-summary-article-number "gnus-sum" ())
 (declare-function gnus-summary-goto-subject
                   "gnus-sum" (article &optional force silent))
+(declare-function gnus-summary-insert-old-articles
+                  "gnus-sum" (&optional all))
+(declare-function gnus-summary-insert-new-articles "gnus-sum" ())
 (declare-function gnus-summary-next-subject
                   "gnus-sum" (n &optional unread dont-display))
 (declare-function gnus-summary-position-point "gnus-sum" ())
@@ -66,6 +69,7 @@
 
 (defvar gnus-current-article)
 (defvar gnus-dormant-mark)
+(defvar gnus-auto-extend-newsgroup)
 (defvar gnus-newsgroup-cached)
 (defvar gnus-newsgroup-data)
 (defvar gnus-newsgroup-forwarded)
@@ -214,6 +218,13 @@
 
 (defcustom bs-gnus-summary-fallback-width 100
   "Width used when a Summary buffer has no live window."
+  :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-summary-auto-extend-count 100
+  "Number of older articles inserted when Summary movement reaches its end.
+A value of zero disables batch insertion without changing
+`gnus-auto-extend-newsgroup'."
   :type 'natnum
   :group 'bs-gnus)
 
@@ -1310,13 +1321,42 @@ Right-align its article count to COUNT-WIDTH columns."
   "Return non-nil when the current buffer is a Gnus Summary buffer."
   (derived-mode-p 'gnus-summary-mode))
 
+(defun bs-gnus--summary-extend-old-articles ()
+  "Insert a batch of older articles and preserve the current article.
+Return non-nil when the Summary gained at least one article."
+  (let ((article (gnus-summary-article-number))
+        (count (length gnus-newsgroup-data)))
+    (gnus-summary-insert-old-articles
+     bs-gnus-summary-auto-extend-count)
+    (when article
+      (gnus-summary-goto-subject article nil t))
+    (> (length gnus-newsgroup-data) count)))
+
+(defun bs-gnus--summary-extend-new-articles ()
+  "Insert newly available articles and preserve the current article.
+Return non-nil when the Summary gained at least one article."
+  (let ((article (gnus-summary-article-number))
+        (count (length gnus-newsgroup-data)))
+    (gnus-summary-insert-new-articles)
+    (when article
+      (gnus-summary-goto-subject article nil t))
+    (> (length gnus-newsgroup-data) count)))
+
 ;;;###autoload
 (defun bs-gnus-summary-next (&optional count)
   "Move to the COUNTth next concrete Summary article."
   (interactive "p")
   (unless (bs-gnus--summary-article-buffer-p)
     (user-error "This command requires a Gnus Summary buffer"))
-  (gnus-summary-next-subject (or count 1)))
+  (let ((remaining
+         (gnus-summary-next-subject (or count 1))))
+    (while (and (> remaining 0)
+                gnus-auto-extend-newsgroup
+                (> bs-gnus-summary-auto-extend-count 0)
+                (bs-gnus--summary-extend-old-articles))
+      (setq remaining
+            (gnus-summary-next-subject remaining)))
+    remaining))
 
 ;;;###autoload
 (defun bs-gnus-summary-previous (&optional count)
@@ -1324,7 +1364,14 @@ Right-align its article count to COUNT-WIDTH columns."
   (interactive "p")
   (unless (bs-gnus--summary-article-buffer-p)
     (user-error "This command requires a Gnus Summary buffer"))
-  (gnus-summary-prev-subject (or count 1)))
+  (let ((remaining
+         (gnus-summary-prev-subject (or count 1))))
+    (when (and (> remaining 0)
+               gnus-auto-extend-newsgroup
+               (bs-gnus--summary-extend-new-articles))
+      (setq remaining
+            (gnus-summary-prev-subject remaining)))
+    remaining))
 
 ;;;###autoload
 (defun bs-gnus-summary-fold-toggle ()
