@@ -69,6 +69,8 @@
 (declare-function xwidget-webkit-goto-uri
                   "xwidget-internal" (xwidget uri))
 (declare-function xwidget-webkit-new-session "xwidget" (url))
+(declare-function xwidget-webkit-scroll-down "xwidget" (&optional arg))
+(declare-function xwidget-webkit-scroll-up "xwidget" (&optional arg))
 
 (defvar browse-url-browser-function)
 (defvar browse-url-handlers)
@@ -233,6 +235,39 @@ The first matching regexp is reported by
 
 (defvar-local bs-mu4e--view-xwidget-source nil
   "Mu4e View buffer rendered by the current dedicated Xwidget buffer.")
+
+(defvar-local bs-mu4e--view-xwidget-return-buffer nil
+  "Xwidget renderer to restore after a bridged View command.")
+
+(defvar-local bs-mu4e--view-xwidget-return-docid nil
+  "Message docid for the pending return to an Xwidget renderer.")
+
+(defvar bs-mu4e--view-xwidget-navigation-window nil
+  "Window to reuse for a View reached from the Xwidget renderer.")
+
+(defvar bs-mu4e--view-xwidget-navigation-docid nil
+  "Expected docid for the pending View navigation.")
+
+(defvar bs-mu4e--view-xwidget-navigation-timer nil
+  "Timer that expires pending Xwidget View navigation state.")
+
+(defconst bs-mu4e--view-xwidget-navigation-commands
+  '(mu4e-headers-next
+    mu4e-headers-prev
+    mu4e-view-headers-next-thread
+    mu4e-view-headers-next-unread
+    mu4e-view-headers-prev-thread
+    mu4e-view-headers-prev-unread)
+  "View commands that can replace the message shown by the renderer.")
+
+(defvar bs-mu4e--view-xwidget-renderer-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '("SPC" "RET" "C-v" "<next>"))
+      (define-key map (kbd key) #'xwidget-webkit-scroll-up))
+    (dolist (key '("S-SPC" "<backspace>" "M-v" "<prior>"))
+      (define-key map (kbd key) #'xwidget-webkit-scroll-down))
+    map)
+  "Page-scrolling bindings used by the dedicated Xwidget renderer.")
 
 (defun bs-mu4e-email-address-p (string)
   "Return non-nil when STRING is a bare email address."
@@ -420,6 +455,7 @@ Use cleaned contact candidates for the duration of the call."
   (with-current-buffer source
     (make-composed-keymap
      (append
+      (list bs-mu4e--view-xwidget-renderer-map)
       (cl-loop
        for (mode . value) in minor-mode-map-alist
        for keymap = (bs-mu4e--view-xwidget-keymap-value value)
@@ -429,10 +465,81 @@ Use cleaned contact candidates for the duration of the call."
                  (symbol-value mode)
                  keymap)
        collect keymap)
-      (list (current-local-map))))))
+      (list (current-local-map)
+            (with-current-buffer bs-mu4e--view-xwidget-buffer
+              bs-mu4e--view-xwidget-original-local-map))))))
+
+(defun bs-mu4e--view-xwidget-clear-navigation ()
+  "Clear pending Xwidget View navigation state."
+  (when (timerp bs-mu4e--view-xwidget-navigation-timer)
+    (cancel-timer bs-mu4e--view-xwidget-navigation-timer))
+  (setq bs-mu4e--view-xwidget-navigation-window nil
+        bs-mu4e--view-xwidget-navigation-docid nil
+        bs-mu4e--view-xwidget-navigation-timer nil))
+
+(defun bs-mu4e--view-xwidget-restore-renderer ()
+  "Restore the Xwidget renderer after a bridged View command."
+  (remove-hook 'post-command-hook
+               #'bs-mu4e--view-xwidget-restore-renderer t)
+  (let ((source (current-buffer))
+        (renderer bs-mu4e--view-xwidget-return-buffer)
+        (docid bs-mu4e--view-xwidget-return-docid))
+    (setq bs-mu4e--view-xwidget-return-buffer nil
+          bs-mu4e--view-xwidget-return-docid nil)
+    (when (window-live-p bs-mu4e--view-xwidget-navigation-window)
+      (let ((target-docid
+             (when-let* ((headers (mu4e-get-headers-buffer)))
+               (with-current-buffer headers
+                 (mu4e~headers-docid-at-point)))))
+        (if (and target-docid (not (equal target-docid docid)))
+            (setq bs-mu4e--view-xwidget-navigation-docid target-docid
+                  bs-mu4e--view-xwidget-navigation-timer
+                  (run-at-time
+                   5 nil #'bs-mu4e--view-xwidget-clear-navigation))
+          (bs-mu4e--view-xwidget-clear-navigation))))
+    (when (and (buffer-live-p renderer)
+               (eq (window-buffer (selected-window)) source)
+               (derived-mode-p 'mu4e-view-mode)
+               (mu4e--view-html-displayed-p)
+               (equal docid
+                      (mu4e-message-field mu4e--view-message :docid))
+               (with-current-buffer renderer
+                 (eq bs-mu4e--view-xwidget-source source)))
+      (switch-to-buffer renderer))))
+
+(defun bs-mu4e--view-xwidget-display-buffer
+    (function buffer-or-name &optional select)
+  "Reuse the pending renderer window when FUNCTION displays a View.
+
+BUFFER-OR-NAME and SELECT are the arguments of `mu4e-display-buffer'."
+  (let ((buffer (get-buffer buffer-or-name))
+        (window bs-mu4e--view-xwidget-navigation-window))
+    (if (and (buffer-live-p buffer)
+             (window-live-p window)
+             (not (window-dedicated-p window))
+             (with-current-buffer buffer
+               (and (derived-mode-p 'mu4e-view-mode)
+                    (or (null bs-mu4e--view-xwidget-navigation-docid)
+                        (equal
+                         bs-mu4e--view-xwidget-navigation-docid
+                         (mu4e-message-field mu4e--view-message :docid))))))
+        (progn
+          (bs-mu4e--view-xwidget-clear-navigation)
+          (set-window-buffer window buffer)
+          (when select
+            (select-window window))
+          window)
+      (funcall function buffer-or-name select))))
 
 (defun bs-mu4e--view-xwidget-detach ()
   "Restore the current Xwidget buffer's native command map."
+  (bs-mu4e--view-xwidget-clear-navigation)
+  (when (buffer-live-p bs-mu4e--view-xwidget-source)
+    (with-current-buffer bs-mu4e--view-xwidget-source
+      (remove-hook 'post-command-hook
+                   #'bs-mu4e--view-xwidget-restore-renderer t)
+      (setq bs-mu4e--view-xwidget-return-buffer nil
+            bs-mu4e--view-xwidget-return-docid nil)))
   (remove-hook 'pre-command-hook
                #'bs-mu4e--view-xwidget-redirect-command t)
   (when bs-mu4e--view-xwidget-original-local-map
@@ -455,7 +562,23 @@ Use cleaned contact candidates for the duration of the call."
               (key-binding keys t))))
       (when (and (commandp local-command)
                  (eq this-command source-command))
-        (switch-to-buffer bs-mu4e--view-xwidget-source)))))
+        (unless (eq this-command 'mu4e-context-switch)
+          (let ((renderer (current-buffer))
+                (source bs-mu4e--view-xwidget-source))
+            (with-current-buffer bs-mu4e--view-xwidget-source
+              (setq bs-mu4e--view-xwidget-return-buffer renderer
+                    bs-mu4e--view-xwidget-return-docid
+                    (mu4e-message-field mu4e--view-message :docid))
+              (add-hook 'post-command-hook
+                        #'bs-mu4e--view-xwidget-restore-renderer nil t))
+            (if (memq this-command
+                      bs-mu4e--view-xwidget-navigation-commands)
+                (progn
+                  (bs-mu4e--view-xwidget-clear-navigation)
+                  (setq bs-mu4e--view-xwidget-navigation-window
+                        (selected-window))
+                  (set-buffer source))
+              (switch-to-buffer source))))))))
 
 (defun bs-mu4e--view-xwidget-attach (buffer source)
   "Use BUFFER only to render HTML for Mu4e View buffer SOURCE."
@@ -533,6 +656,8 @@ Use cleaned contact candidates for the duration of the call."
                #'bs-mu4e--view-open-html-in-xwidget)
   (add-hook 'mu4e-view-rendered-hook
             #'bs-mu4e--view-open-html-in-xwidget t)
+  (bs-mu4e-add-around-advice
+   'mu4e-display-buffer #'bs-mu4e--view-xwidget-display-buffer)
   (unless (advice-member-p
            #'bs-mu4e--view-after-toggle-html
            'mu4e-view-toggle-html)
@@ -550,6 +675,8 @@ Use cleaned contact candidates for the duration of the call."
   (when (featurep 'mu4e-view)
     (remove-hook 'mu4e-view-rendered-hook
                  #'bs-mu4e--view-open-html-in-xwidget)
+    (advice-remove 'mu4e-display-buffer
+                   #'bs-mu4e--view-xwidget-display-buffer)
     (advice-remove 'mu4e-view-toggle-html
                    #'bs-mu4e--view-after-toggle-html)))
 
