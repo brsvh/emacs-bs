@@ -34,6 +34,7 @@
 (declare-function mail-header-date "nnheader" (header))
 (declare-function mail-header-from "nnheader" (header))
 (declare-function mail-header-subject "nnheader" (header))
+(declare-function gnus-active "gnus-start" (group))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
 (declare-function gnus-data-header "gnus-sum" (data))
 (declare-function gnus-data-level "gnus-sum" (data))
@@ -49,6 +50,15 @@
 (declare-function gnus-summary-prepare "gnus-sum" ())
 (declare-function gnus-summary-prev-subject
                   "gnus-sum" (n &optional unread))
+(declare-function gnus-group-list-groups
+                  "gnus-group"
+                  (&optional level unread lowest update-level))
+(declare-function gnus-topic-fold "gnus-topic" (&optional insert topic))
+(declare-function gnus-topic-goto-topic "gnus-topic" (topic))
+(declare-function gnus-topic-indent "gnus-topic" ())
+(declare-function gnus-topic-unindent "gnus-topic" ())
+(declare-function gnus-topic-update-topic-line
+                  "gnus-topic" (topic-name &optional reads))
 (declare-function gnus-update-format-specifications
                   "gnus-spec"
                   (&optional force type1 type2 type3 type4))
@@ -66,8 +76,11 @@
 (defvar gnus-newsgroup-saved)
 (defvar gnus-newsgroup-undownloaded)
 (defvar gnus-newsgroup-unseen)
+(defvar gnus-group-list-mode)
 (defvar gnus-summary-line-format)
 (defvar gnus-ticked-mark)
+(defvar gnus-topic-alist)
+(defvar gnus-topic-mode)
 (defvar gnus-tmp-thread-tree-header-string)
 (defvar gnus-tmp-unread)
 (defvar gnus-unread-mark)
@@ -124,6 +137,61 @@
   "Face for folded-reply indicators."
   :group 'bs-gnus)
 
+(defface bs-gnus-group-unread-face
+  '((t :inherit error :weight bold))
+  "Face for nonzero unread counts in Group buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-read-face
+  '((t :inherit shadow))
+  "Face for zero unread counts in Group buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-total-face
+  '((t :inherit shadow))
+  "Face for total article counts in Group buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-separator-face
+  '((t :inherit shadow))
+  "Face for separators in Group buffer article counts."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-name-face
+  '((t :inherit default))
+  "Face for group names regardless of their unread state."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-source-face
+  '((t :inherit shadow))
+  "Face for right-aligned source labels in Group buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-topic-face
+  '((t :inherit bs-gnus-summary-title-face))
+  "Face for topic names in Group buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-root-topic-face
+  '((t :height 1.30))
+  "Relative size applied to the root Topic row."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-top-level-topic-face
+  '((t :height 1.15))
+  "Relative size applied to top-level Topic rows."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-topic-count-face
+  '((t :inherit error :weight semibold :inverse-video nil))
+  "Face for nonzero topic unread counts."
+  :group 'bs-gnus)
+
+(defface bs-gnus-group-topic-empty-count-face
+  '((t :inherit shadow))
+  "Face for zero topic unread counts."
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-summary-date-format "%m/%d/%Y %I:%M:%S %p"
   "Format used for article dates in Summary buffers."
   :type 'string
@@ -147,6 +215,21 @@
 (defcustom bs-gnus-summary-fallback-width 100
   "Width used when a Summary buffer has no live window."
   :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-group-count-width 9
+  "Minimum columns reserved for a Group buffer article count."
+  :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-group-fallback-width 100
+  "Width used when a Group buffer has no live window."
+  :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-group-topic-spacing-height 0.65
+  "Relative spacing added around Topic rows."
+  :type 'number
   :group 'bs-gnus)
 
 (defconst bs-gnus--summary-line-format " %U%R%O%z%* %ub\n"
@@ -184,7 +267,545 @@
 (defvar-local bs-gnus--summary-resize-timer nil
   "Idle timer used to debounce Summary resize rendering.")
 
+(defvar bs-gnus--group-enabled nil
+  "Non-nil when the custom Group renderer is installed.")
+
+(defvar-local bs-gnus--group-decoration-timer nil
+  "Idle timer used to debounce Group buffer decoration.")
+
+(defvar-local bs-gnus--group-render-width nil
+  "Width used for the latest Group buffer render.")
+
+(defvar-local bs-gnus--group-resize-timer nil
+  "Idle timer used to debounce Group buffer resize rendering.")
+
 (put 'bs-gnus--summary-fold-state 'permanent-local t)
+
+(defun bs-gnus--group-window ()
+  "Return a window suitable for sizing the current Group buffer."
+  (or (and (eq (window-buffer (selected-window)) (current-buffer))
+           (selected-window))
+      (get-buffer-window (current-buffer) t)))
+
+(defun bs-gnus--group-width ()
+  "Return the display width for the current Group buffer."
+  (if-let* ((window (bs-gnus--group-window)))
+      (window-body-width window)
+    bs-gnus-group-fallback-width))
+
+(defun bs-gnus--group-truncate (string width)
+  "Truncate STRING to WIDTH columns with an ASCII ellipsis."
+  (cond
+   ((<= width 0) "")
+   ((<= (string-width string) width) string)
+   (t
+    (truncate-string-to-width
+     string width 0 nil (and (> width 3) "...")))))
+
+(defun bs-gnus--group-right-padding (string)
+  "Return padding that right-aligns STRING with a two-column margin."
+  (propertize
+   " "
+   'display
+   `(space
+     :align-to
+     (- right
+        (+ (,(string-pixel-width string)) 2)))))
+
+(defun bs-gnus--group-source (group)
+  "Return the concise source label for GROUP."
+  (cond
+   ((string-prefix-p "nntp+gmane:" group) "Gmane")
+   ((or (not (string-match-p "\\`nn" group))
+        (string-match-p "\\`nntp\\(?:\\+[^:]+\\)?:" group))
+    "Usenet")
+   (t "Local")))
+
+(defun bs-gnus--group-display-name (group)
+  "Return the display name for GROUP."
+  (string-remove-prefix "nntp+gmane:" group))
+
+(defun bs-gnus--group-total (group)
+  "Return the estimated number of articles available in GROUP."
+  (if-let* ((active (gnus-active group)))
+      (1+ (- (cdr active) (car active)))
+    0))
+
+(defun bs-gnus--group-format-row
+    (group unread indentation width)
+  "Format GROUP with UNREAD articles and INDENTATION for WIDTH."
+  (let* ((unread-number (and (numberp unread) (max 0 unread)))
+         (unread-string
+          (format
+           "%2s"
+           (if unread-number (number-to-string unread-number) "*")))
+         (total-string
+          (number-to-string (bs-gnus--group-total group)))
+         (unread-face
+          (if (and unread-number (> unread-number 0))
+              'bs-gnus-group-unread-face
+            'bs-gnus-group-read-face))
+         (count
+          (concat
+           (propertize unread-string 'face unread-face)
+           (propertize "/" 'face 'bs-gnus-group-separator-face)
+           (propertize total-string 'face 'bs-gnus-group-total-face)))
+         (count
+          (concat
+           count
+           (make-string
+            (max 0 (- bs-gnus-group-count-width
+                      (string-width count)))
+            ?\s)))
+         (prefix (concat indentation count "  "))
+         (source
+          (propertize
+           (bs-gnus--group-source group)
+           'face 'bs-gnus-group-source-face))
+         (name-width
+          (max 0
+               (- width
+                  (string-width prefix)
+                  (string-width source)
+                  4)))
+         (name
+          (propertize
+           (bs-gnus--group-truncate
+            (bs-gnus--group-display-name group)
+            name-width)
+           'face 'bs-gnus-group-name-face))
+         (padding
+          (bs-gnus--group-right-padding source)))
+    (concat prefix name padding source)))
+
+(defun bs-gnus--group-topic-level-face (level)
+  "Return the relative-size face for a Topic at LEVEL."
+  (cond
+   ((zerop level) 'bs-gnus-group-root-topic-face)
+   ((= level 1) 'bs-gnus-group-top-level-topic-face)))
+
+(defun bs-gnus--group-root-statistics (unread)
+  "Return root Topic statistics containing UNREAD articles."
+  (let* ((groups (bs-gnus--group-groups))
+         (total
+          (cl-loop
+           for group in groups
+           sum (bs-gnus--group-total group)))
+         (unread (if (numberp unread) (max 0 unread) 0))
+         (unread-face
+          (if (> unread 0)
+              'bs-gnus-group-topic-count-face
+            'bs-gnus-group-topic-empty-count-face)))
+    (concat
+     (propertize
+      (format "%d subscribed · " (length groups))
+      'face 'bs-gnus-group-source-face)
+     (propertize
+      (number-to-string unread)
+      'face unread-face)
+     (propertize
+      " unread · "
+      'face 'bs-gnus-group-source-face)
+     (propertize
+      (number-to-string total)
+      'face 'bs-gnus-group-total-face)
+     (propertize
+      " total"
+      'face 'bs-gnus-group-source-face))))
+
+(defun bs-gnus--group-format-topic
+    (topic level unread visible width)
+  "Format TOPIC at LEVEL with UNREAD articles for WIDTH.
+
+VISIBLE says whether the topic is expanded."
+  (let* ((prefix
+          (if visible
+              "  "
+            (propertize
+             "▸ " 'face 'bs-gnus-group-topic-face)))
+         (count-string
+          (number-to-string (if (numberp unread) unread 0)))
+         (count
+          (let ((face
+                 (if (and (numberp unread) (> unread 0))
+                     'bs-gnus-group-topic-count-face
+                   'bs-gnus-group-topic-empty-count-face)))
+            (propertize count-string 'face face)))
+         (statistics
+          (if (zerop level)
+              (bs-gnus--group-root-statistics unread)
+            (concat
+             (propertize
+              " (" 'face 'bs-gnus-group-separator-face)
+             count
+             (propertize
+              ")" 'face 'bs-gnus-group-separator-face))))
+         (title-width
+          (max 0
+               (- width
+                  (string-width prefix)
+                  (string-width statistics)
+                  (if (zerop level) 4 0))))
+         (title
+          (propertize
+           (bs-gnus--group-truncate topic title-width)
+           'face 'bs-gnus-group-topic-face))
+         (padding
+          (if (zerop level)
+              (bs-gnus--group-right-padding statistics)
+            "")))
+    (let ((line (concat prefix title padding statistics)))
+      (when-let* ((face
+                   (bs-gnus--group-topic-level-face level)))
+        (add-face-text-property
+         0
+         (if (zerop level)
+             (+ (length prefix) (length title))
+           (length line))
+         face t line))
+      line)))
+
+(defun bs-gnus--group-preserved-properties ()
+  "Return operational properties on the current Group buffer line."
+  (let ((properties
+         (text-properties-at (line-beginning-position)))
+        preserved)
+    (while properties
+      (let ((property (pop properties))
+            (value (pop properties)))
+        (unless (memq property '(display face font-lock-face))
+          (setq preserved
+                (nconc preserved (list property value))))))
+    preserved))
+
+(defun bs-gnus--group-replace-line (string)
+  "Replace the current Group buffer line with STRING."
+  (let ((beginning (line-beginning-position))
+        (end (line-end-position))
+        (properties (bs-gnus--group-preserved-properties)))
+    (delete-region beginning end)
+    (insert string)
+    (add-text-properties beginning (point) properties)))
+
+(defun bs-gnus--group-groups ()
+  "Return groups assigned to topics without duplicates."
+  (let (groups)
+    (dolist (topic gnus-topic-alist)
+      (dolist (group (cdr topic))
+        (when (stringp group)
+          (cl-pushnew group groups :test #'equal))))
+    groups))
+
+(defun bs-gnus--group-add-topic-spacing (position trailing)
+  "Add spacing around the Topic row at POSITION.
+TRAILING says to add spacing below the row as well."
+  (save-excursion
+    (goto-char position)
+    (let* ((newline (line-end-position))
+           (prefix
+            (propertize
+             " "
+             'display
+             `(space
+               :width 0
+               :height
+               ,(+ 1.0 bs-gnus-group-topic-spacing-height)
+               :ascent 100))))
+      (when (< position (point-max))
+        (add-text-properties
+         position (1+ position)
+         `(bs-gnus-group-topic-spacing t
+                                       line-prefix ,prefix)))
+      (when trailing
+        (add-text-properties
+         newline (1+ newline)
+         `(bs-gnus-group-topic-spacing t
+                                       line-spacing
+                                       ,bs-gnus-group-topic-spacing-height))))))
+
+(defun bs-gnus--group-remove-topic-spacing ()
+  "Remove partial-line spacing added around Topics."
+  (let ((limit (point-max))
+        (position (point-min)))
+    (while (setq position
+                 (text-property-any
+                  position limit
+                  'bs-gnus-group-topic-spacing t))
+      (let ((end
+             (next-single-property-change
+              position
+              'bs-gnus-group-topic-spacing
+              nil limit)))
+        (remove-text-properties
+         position end
+         '(bs-gnus-group-topic-spacing nil
+                                       line-prefix nil
+                                       line-height nil
+                                       line-spacing nil))
+        (setq position end)))))
+
+(defun bs-gnus--group-remove-decorations ()
+  "Remove custom overview and separator lines from the Group buffer."
+  (let ((inhibit-read-only t))
+    (bs-gnus--group-remove-topic-spacing)
+    (goto-char (point-min))
+    (while (not (eobp))
+      (if (get-text-property
+           (line-beginning-position)
+           'bs-gnus-group-decoration)
+          (delete-region
+           (line-beginning-position)
+           (line-beginning-position 2))
+        (forward-line 1)))))
+
+(defun bs-gnus--group-topic-rows ()
+  "Return Topic row positions paired with trailing-spacing flags."
+  (let (rows)
+    (goto-char (point-min))
+    (while (not (eobp))
+      (when (get-text-property
+             (line-beginning-position) 'gnus-topic)
+        (let* ((position (line-beginning-position))
+               (next-line (line-beginning-position 2))
+               (next-topic
+                (get-text-property next-line 'gnus-topic)))
+          (push (cons position (not next-topic)) rows)))
+      (forward-line 1))
+    (nreverse rows)))
+
+(defun bs-gnus--group-decorate ()
+  "Decorate the current native Gnus Group buffer."
+  (when (and bs-gnus--group-enabled
+             (derived-mode-p 'gnus-group-mode)
+             (bound-and-true-p gnus-topic-mode))
+    (let ((topic
+           (get-text-property
+            (line-beginning-position) 'gnus-topic))
+          (column (current-column))
+          (width (bs-gnus--group-width))
+          (inhibit-read-only t))
+      (save-excursion
+        (bs-gnus--group-remove-decorations)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((group
+                 (get-text-property
+                  (line-beginning-position) 'gnus-group))
+                (topic
+                 (get-text-property
+                  (line-beginning-position) 'gnus-topic)))
+            (cond
+             (topic
+              (let ((level
+                     (get-text-property
+                      (line-beginning-position)
+                      'gnus-topic-level))
+                    (unread
+                     (get-text-property
+                      (line-beginning-position)
+                      'gnus-topic-unread))
+                    (visible
+                     (get-text-property
+                      (line-beginning-position)
+                      'gnus-topic-visible)))
+                (bs-gnus--group-replace-line
+                 (bs-gnus--group-format-topic
+                  topic level unread visible width))))
+             (group
+              (bs-gnus--group-replace-line
+               (bs-gnus--group-format-row
+                group
+                (get-text-property
+                 (line-beginning-position) 'gnus-unread)
+                (or (get-text-property
+                     (line-beginning-position)
+                     'gnus-indentation)
+                    "")
+                width)))))
+          (forward-line 1))
+        (dolist (row (bs-gnus--group-topic-rows))
+          (bs-gnus--group-add-topic-spacing
+           (car row) (cdr row))))
+      (setq bs-gnus--group-render-width width)
+      (when (and topic (gnus-topic-goto-topic topic))
+        (move-to-column column)))))
+
+(defun bs-gnus--group-after-topic-change (&rest _arguments)
+  "Redecorate a Group buffer after its topic structure changes."
+  (when (derived-mode-p 'gnus-group-mode)
+    (bs-gnus--group-decorate)))
+
+(defun bs-gnus--group-around-topic-fold (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS while preserving point on its Topic."
+  (let ((topic
+         (and (derived-mode-p 'gnus-group-mode)
+              (get-text-property
+               (line-beginning-position) 'gnus-topic)))
+        (column (current-column)))
+    (prog1
+        (apply function arguments)
+      (when (derived-mode-p 'gnus-group-mode)
+        (when (timerp bs-gnus--group-decoration-timer)
+          (cancel-timer bs-gnus--group-decoration-timer)
+          (setq bs-gnus--group-decoration-timer nil))
+        (bs-gnus--group-decorate)
+        (when (and topic (gnus-topic-goto-topic topic))
+          (move-to-column column))))))
+
+(defun bs-gnus--group-run-decoration (buffer)
+  "Decorate Group BUFFER after a debounced native update."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq bs-gnus--group-decoration-timer nil)
+      (bs-gnus--group-decorate))))
+
+(defun bs-gnus--group-schedule-decoration (&rest _arguments)
+  "Schedule decoration after a native Group or Topic line update."
+  (when (derived-mode-p 'gnus-group-mode)
+    (when (timerp bs-gnus--group-decoration-timer)
+      (cancel-timer bs-gnus--group-decoration-timer))
+    (setq bs-gnus--group-decoration-timer
+          (run-with-idle-timer
+           0.05 nil
+           #'bs-gnus--group-run-decoration
+           (current-buffer)))))
+
+(defun bs-gnus--group-rerender (buffer)
+  "Rerender visible Group BUFFER after a debounced resize."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq bs-gnus--group-resize-timer nil)
+      (when (and bs-gnus--group-enabled
+                 (get-buffer-window buffer t)
+                 (not (equal
+                       (bs-gnus--group-width)
+                       bs-gnus--group-render-width)))
+        (bs-gnus--group-decorate)))))
+
+(defun bs-gnus--group-schedule-resize (buffer)
+  "Schedule a debounced resize render for Group BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (timerp bs-gnus--group-resize-timer)
+        (cancel-timer bs-gnus--group-resize-timer))
+      (setq bs-gnus--group-resize-timer
+            (run-with-idle-timer
+             0.2 nil #'bs-gnus--group-rerender buffer)))))
+
+(defun bs-gnus--group-window-size-change (frame)
+  "Schedule rerenders for visible Group buffers on FRAME."
+  (let ((seen (make-hash-table :test #'eq)))
+    (dolist (window (window-list frame 'no-minibuffer))
+      (let ((buffer (window-buffer window)))
+        (when (and (not (gethash buffer seen))
+                   (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (and (derived-mode-p 'gnus-group-mode)
+                          bs-gnus--group-enabled)))
+          (puthash buffer t seen)
+          (bs-gnus--group-schedule-resize buffer))))))
+
+(defun bs-gnus--group-cancel-timers ()
+  "Cancel timers owned by the current Group buffer."
+  (when (timerp bs-gnus--group-decoration-timer)
+    (cancel-timer bs-gnus--group-decoration-timer))
+  (when (timerp bs-gnus--group-resize-timer)
+    (cancel-timer bs-gnus--group-resize-timer))
+  (setq bs-gnus--group-decoration-timer nil
+        bs-gnus--group-resize-timer nil))
+
+(defun bs-gnus--group-configure-buffer ()
+  "Configure the current Gnus Group buffer."
+  (add-hook 'kill-buffer-hook
+            #'bs-gnus--group-cancel-timers nil t))
+
+(defun bs-gnus--group-buffers ()
+  "Return live Gnus Group buffers."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (derived-mode-p 'gnus-group-mode)))
+   (buffer-list)))
+
+;;;###autoload
+(defun bs-gnus-group-topic-toggle ()
+  "Toggle the topic at point without changing its hierarchy."
+  (interactive)
+  (unless (derived-mode-p 'gnus-group-mode)
+    (user-error "This command requires a Gnus Group buffer"))
+  (unless (get-text-property
+           (line-beginning-position) 'gnus-topic)
+    (user-error "No topic at point"))
+  (gnus-topic-fold))
+
+(defun bs-gnus--group-install ()
+  "Install the custom Gnus Group renderer."
+  (unless bs-gnus--group-enabled
+    (setq bs-gnus--group-enabled t)
+    (add-hook 'gnus-group-mode-hook
+              #'bs-gnus--group-configure-buffer)
+    (add-hook 'gnus-group-prepare-hook
+              #'bs-gnus--group-decorate)
+    (add-hook 'gnus-group-update-hook
+              #'bs-gnus--group-schedule-decoration)
+    (add-hook 'window-size-change-functions
+              #'bs-gnus--group-window-size-change)
+    (advice-remove 'gnus-topic-fold
+                   #'bs-gnus--group-after-topic-change)
+    (advice-add 'gnus-topic-fold
+                :around #'bs-gnus--group-around-topic-fold)
+    (advice-add 'gnus-topic-indent
+                :after #'bs-gnus--group-after-topic-change)
+    (advice-add 'gnus-topic-unindent
+                :after #'bs-gnus--group-after-topic-change)
+    (advice-add 'gnus-topic-update-topic-line
+                :after #'bs-gnus--group-schedule-decoration)
+    (dolist (buffer (bs-gnus--group-buffers))
+      (with-current-buffer buffer
+        (bs-gnus--group-configure-buffer)
+        (bs-gnus--group-decorate))))
+  t)
+
+;;;###autoload
+(defun bs-gnus-group-disable ()
+  "Restore Gnus's native Group renderer.
+
+This is an emergency and debugging command, not a minor mode."
+  (interactive)
+  (when bs-gnus--group-enabled
+    (setq bs-gnus--group-enabled nil)
+    (remove-hook 'gnus-group-mode-hook
+                 #'bs-gnus--group-configure-buffer)
+    (remove-hook 'gnus-group-prepare-hook
+                 #'bs-gnus--group-decorate)
+    (remove-hook 'gnus-group-update-hook
+                 #'bs-gnus--group-schedule-decoration)
+    (remove-hook 'window-size-change-functions
+                 #'bs-gnus--group-window-size-change)
+    (advice-remove 'gnus-topic-fold
+                   #'bs-gnus--group-around-topic-fold)
+    (advice-remove 'gnus-topic-fold
+                   #'bs-gnus--group-after-topic-change)
+    (advice-remove 'gnus-topic-indent
+                   #'bs-gnus--group-after-topic-change)
+    (advice-remove 'gnus-topic-unindent
+                   #'bs-gnus--group-after-topic-change)
+    (advice-remove 'gnus-topic-update-topic-line
+                   #'bs-gnus--group-schedule-decoration)
+    (dolist (buffer (bs-gnus--group-buffers))
+      (with-current-buffer buffer
+        (bs-gnus--group-cancel-timers)
+        (bs-gnus--group-remove-decorations)
+        (gnus-group-list-groups
+         (car gnus-group-list-mode)
+         (cdr gnus-group-list-mode))))))
+
+;;;###autoload
+(defun bs-gnus-group-enable ()
+  "Enable the bs-gnus Group renderer."
+  (interactive)
+  (with-eval-after-load 'gnus-topic
+    (bs-gnus--group-install)))
 
 (defun bs-gnus--summary-sanitize-string (string)
   "Return STRING without control characters that break one-line layout."
