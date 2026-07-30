@@ -31,6 +31,9 @@
 (require 'mail-parse)
 (require 'subr-x)
 
+(declare-function mail-header-date "nnheader" (header))
+(declare-function mail-header-from "nnheader" (header))
+(declare-function mail-header-subject "nnheader" (header))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
 (declare-function gnus-data-header "gnus-sum" (data))
 (declare-function gnus-data-level "gnus-sum" (data))
@@ -116,9 +119,19 @@
   "Face for the group summary line."
   :group 'bs-gnus)
 
+(defface bs-gnus-summary-fold-indicator-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for folded-reply indicators."
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-summary-date-format "%m/%d/%Y %I:%M:%S %p"
   "Format used for article dates in Summary buffers."
   :type 'string
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-summary-fold-indicator ?▸
+  "Character displayed at the left edge of an article with folded replies."
+  :type 'character
   :group 'bs-gnus)
 
 (defcustom bs-gnus-summary-thread-count-digits 4
@@ -136,8 +149,11 @@
   :type 'natnum
   :group 'bs-gnus)
 
-(defconst bs-gnus--summary-line-format "%U%R%O%z%* %ub\n"
+(defconst bs-gnus--summary-line-format " %U%R%O%z%* %ub\n"
   "Gnus Summary format used by the custom renderer.")
+
+(defconst bs-gnus--summary-prefix-width 6
+  "Columns reserved before the thread-tree prefix.")
 
 (defconst bs-gnus--summary-setting-symbols
   '(gnus-summary-line-format
@@ -154,7 +170,7 @@
   "Idle timer used to debounce Summary decoration.")
 
 (defvar-local bs-gnus--summary-fold-state nil
-  "Hash table mapping thread roots to visible anchor articles.")
+  "Hash table containing article numbers whose replies are folded.")
 
 (defvar-local bs-gnus--summary-original-settings nil
   "Settings replaced in the current Summary buffer.")
@@ -377,36 +393,60 @@ Right-align its article count to COUNT-WIDTH columns."
      (cl-find article thread :key #'gnus-data-number))
    (bs-gnus--summary-threads)))
 
-(defun bs-gnus--summary-apply-fold (thread)
-  "Apply the saved fold state to THREAD."
-  (let* ((root (gnus-data-number (car thread)))
-         (anchor
-          (and (hash-table-p bs-gnus--summary-fold-state)
-               (gethash root bs-gnus--summary-fold-state))))
-    (when anchor
-      (unless (cl-find anchor thread :key #'gnus-data-number)
-        (setq anchor root)
-        (puthash root anchor bs-gnus--summary-fold-state))
-      (dolist (data thread)
-        (unless (or (= (gnus-data-number data) anchor)
-                    (bs-gnus--summary-important-data-p data))
-          (save-excursion
-            (goto-char (gnus-data-pos data))
-            (let ((overlay
-                   (make-overlay
-                    (line-beginning-position)
-                    (line-beginning-position 2)
-                    nil t nil)))
-              (overlay-put overlay 'invisible 'gnus-sum)
-              (overlay-put overlay 'evaporate t)
-              (overlay-put overlay 'bs-gnus-fold-overlay t)
-              (overlay-put overlay 'bs-gnus-thread-root root))))))))
+(defun bs-gnus--summary-descendants (article thread)
+  "Return descendants of ARTICLE within THREAD."
+  (when-let* ((tail
+               (cl-member article thread :key #'gnus-data-number)))
+    (let ((level (gnus-data-level (car tail))))
+      (cl-loop for data in (cdr tail)
+               while (> (gnus-data-level data) level)
+               collect data))))
+
+(defun bs-gnus--summary-add-fold-indicator (article thread)
+  "Display a fold indicator on ARTICLE within THREAD."
+  (when-let* ((data
+               (cl-find article thread :key #'gnus-data-number)))
+    (save-excursion
+      (goto-char (gnus-data-pos data))
+      (let ((position (line-beginning-position)))
+        (when (eq (char-after position) ?\s)
+          (let ((overlay
+                 (make-overlay position (1+ position) nil t nil)))
+            (overlay-put
+             overlay 'display
+             (propertize
+              (char-to-string bs-gnus-summary-fold-indicator)
+              'face 'bs-gnus-summary-fold-indicator-face))
+            (overlay-put overlay 'evaporate t)
+            (overlay-put overlay 'bs-gnus-fold-overlay t)
+            (overlay-put overlay 'bs-gnus-fold-indicator t)
+            (overlay-put overlay 'bs-gnus-fold-anchor article)))))))
+
+(defun bs-gnus--summary-apply-fold (article thread)
+  "Hide unimportant descendants of ARTICLE within THREAD."
+  (bs-gnus--summary-add-fold-indicator article thread)
+  (dolist (data (bs-gnus--summary-descendants article thread))
+    (unless (bs-gnus--summary-important-data-p data)
+      (save-excursion
+        (goto-char (gnus-data-pos data))
+        (let ((overlay
+               (make-overlay
+                (line-beginning-position)
+                (line-beginning-position 2)
+                nil t nil)))
+          (overlay-put overlay 'invisible 'bs-gnus-fold)
+          (overlay-put overlay 'evaporate t)
+          (overlay-put overlay 'bs-gnus-fold-overlay t)
+          (overlay-put overlay 'bs-gnus-fold-anchor article))))))
 
 (defun bs-gnus--summary-apply-folds (threads)
   "Apply saved folds to THREADS."
   (bs-gnus--summary-remove-fold-overlays)
   (dolist (thread threads)
-    (bs-gnus--summary-apply-fold thread)))
+    (dolist (data thread)
+      (let ((article (gnus-data-number data)))
+        (when (gethash article bs-gnus--summary-fold-state)
+          (bs-gnus--summary-apply-fold article thread))))))
 
 (defun bs-gnus--summary-restore-selection (article)
   "Restore point to ARTICLE when it remains available."
@@ -580,7 +620,7 @@ Right-align its article count to COUNT-WIDTH columns."
           (max
            0
            (- (bs-gnus--summary-width)
-              5
+              bs-gnus--summary-prefix-width
               (string-width prefix)
               (string-width date)
               1)))
@@ -624,6 +664,7 @@ Right-align its article count to COUNT-WIDTH columns."
           (make-hash-table :test #'eql)))
   (setq-local gnus-summary-line-format bs-gnus--summary-line-format)
   (setq-local header-line-format nil)
+  (add-to-invisibility-spec 'bs-gnus-fold)
   (add-hook 'kill-buffer-hook
             #'bs-gnus--summary-cancel-timers nil t))
 
@@ -636,6 +677,7 @@ Right-align its article count to COUNT-WIDTH columns."
       (bs-gnus--summary-remove-decorations)
       (dolist (setting bs-gnus--summary-original-settings)
         (set (make-local-variable (car setting)) (cdr setting)))
+      (remove-from-invisibility-spec 'bs-gnus-fold)
       (setq bs-gnus--summary-original-settings nil
             bs-gnus--summary-fold-state nil
             bs-gnus--summary-render-width nil)
@@ -665,27 +707,29 @@ Right-align its article count to COUNT-WIDTH columns."
 
 ;;;###autoload
 (defun bs-gnus-summary-fold-toggle ()
-  "Toggle folding for the thread containing the article at point."
+  "Toggle folding of replies to the article at point."
   (interactive)
   (unless (and (bs-gnus--summary-article-buffer-p)
                bs-gnus--summary-rendered)
     (user-error "The custom Gnus Summary renderer is not active"))
   (let* ((article (gnus-summary-article-number))
-         (thread (bs-gnus--summary-thread-for-article article)))
+         (thread (bs-gnus--summary-thread-for-article article))
+         (descendants
+          (and thread
+               (bs-gnus--summary-descendants article thread))))
     (unless thread
       (user-error "No article thread at point"))
-    (when (= (length thread) 1)
-      (user-error "The current thread has only one article"))
-    (let ((root (gnus-data-number (car thread))))
-      (if (gethash root bs-gnus--summary-fold-state)
-          (progn
-            (remhash root bs-gnus--summary-fold-state)
-            (remove-overlays
-             (point-min) (point-max)
-             'bs-gnus-thread-root root))
-        (puthash root article bs-gnus--summary-fold-state)
-        (bs-gnus--summary-apply-fold thread))
-      (bs-gnus--summary-restore-selection article))))
+    (unless descendants
+      (user-error "The current article has no replies"))
+    (if (gethash article bs-gnus--summary-fold-state)
+        (progn
+          (remhash article bs-gnus--summary-fold-state)
+          (remove-overlays
+           (point-min) (point-max)
+           'bs-gnus-fold-anchor article))
+      (puthash article t bs-gnus--summary-fold-state)
+      (bs-gnus--summary-apply-fold article thread))
+    (bs-gnus--summary-restore-selection article)))
 
 (defun bs-gnus--summary-buffers ()
   "Return live Gnus Summary buffers."
