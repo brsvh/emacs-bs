@@ -38,6 +38,7 @@
 (declare-function mail-header-references "nnheader" (header))
 (declare-function mail-header-subject "nnheader" (header))
 (declare-function gnus-active "gnus-start" (group))
+(declare-function gnus-group-entry "gnus-start" (group))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
 (declare-function gnus-data-header "gnus-sum" (data))
 (declare-function gnus-data-level "gnus-sum" (data))
@@ -93,6 +94,7 @@
 (defvar gnus-summary-line-format)
 (defvar gnus-ticked-mark)
 (defvar gnus-topic-alist)
+(defvar gnus-topic-indent-level)
 (defvar gnus-topic-mode)
 (defvar gnus-tmp-thread-tree-header-string)
 (defvar gnus-tmp-unread)
@@ -243,7 +245,7 @@ A value of zero disables batch insertion without changing
   :group 'bs-gnus)
 
 (defcustom bs-gnus-group-count-width 9
-  "Minimum columns reserved for a Group buffer article count."
+  "Minimum total columns reserved for a Group buffer article count."
   :type 'natnum
   :group 'bs-gnus)
 
@@ -356,13 +358,74 @@ A value of zero disables batch insertion without changing
       (1+ (- (cdr active) (car active)))
     0))
 
+(defun bs-gnus--group-max-indentation-width ()
+  "Return the widest group indentation represented in the Topic tree."
+  (let ((width 0))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((indentation
+               (get-text-property
+                (line-beginning-position)
+                'gnus-indentation))
+              (level
+               (get-text-property
+                (line-beginning-position)
+                'gnus-topic-level)))
+          (setq width
+                (max width
+                     (if (stringp indentation)
+                         (string-width indentation)
+                       0)
+                     (if (numberp level)
+                         (* level gnus-topic-indent-level)
+                       0))))
+        (forward-line 1)))
+    width))
+
+(defun bs-gnus--group-count-widths ()
+  "Return unread, total, and indentation widths for Group counts."
+  (let ((unread-width 2)
+        (total-width 1))
+    (dolist (group (bs-gnus--group-groups))
+      (let* ((entry (gnus-group-entry group))
+             (unread (and entry (car entry))))
+        (setq unread-width
+              (max unread-width
+                   (string-width
+                    (if (numberp unread)
+                        (number-to-string (max 0 unread))
+                      "*")))
+              total-width
+              (max total-width
+                   (string-width
+                    (number-to-string
+                     (bs-gnus--group-total group)))))))
+    (setq total-width
+          (+ total-width
+             (max 0
+                  (- bs-gnus-group-count-width
+                     unread-width 1 total-width))))
+    (list
+     unread-width
+     total-width
+     (bs-gnus--group-max-indentation-width))))
+
 (defun bs-gnus--group-format-row
-    (group unread indentation width)
-  "Format GROUP with UNREAD articles and INDENTATION for WIDTH."
-  (let* ((unread-number (and (numberp unread) (max 0 unread)))
+    (group unread indentation width count-widths)
+  "Format GROUP with UNREAD articles and INDENTATION for WIDTH.
+COUNT-WIDTHS contains the unread, total, and indentation widths."
+  (let* ((unread-width
+          (+ (nth 0 count-widths)
+             (max
+              0
+              (- (nth 2 count-widths)
+                 (string-width indentation)))))
+         (total-width (nth 1 count-widths))
+         (unread-number (and (numberp unread) (max 0 unread)))
          (unread-string
           (format
-           "%2s"
+           (format "%%%ds" unread-width)
            (if unread-number (number-to-string unread-number) "*")))
          (total-string
           (number-to-string (bs-gnus--group-total group)))
@@ -374,13 +437,9 @@ A value of zero disables batch insertion without changing
           (concat
            (propertize unread-string 'face unread-face)
            (propertize "/" 'face 'bs-gnus-group-separator-face)
-           (propertize total-string 'face 'bs-gnus-group-total-face)))
-         (count
-          (concat
-           count
+           (propertize total-string 'face 'bs-gnus-group-total-face)
            (make-string
-            (max 0 (- bs-gnus-group-count-width
-                      (string-width count)))
+            (max 0 (- total-width (string-width total-string)))
             ?\s)))
          (prefix (concat indentation count "  "))
          (source
@@ -608,6 +667,7 @@ TRAILING says to add spacing below the row as well."
             (line-beginning-position) 'gnus-topic))
           (column (current-column))
           (width (bs-gnus--group-width))
+          (count-widths (bs-gnus--group-count-widths))
           (inhibit-read-only t))
       (save-excursion
         (bs-gnus--group-remove-decorations)
@@ -646,7 +706,8 @@ TRAILING says to add spacing below the row as well."
                      (line-beginning-position)
                      'gnus-indentation)
                     "")
-                width)))))
+                width
+                count-widths)))))
           (forward-line 1))
         (dolist (row (bs-gnus--group-topic-rows))
           (bs-gnus--group-add-topic-spacing
@@ -1220,9 +1281,10 @@ Right-align its article count to COUNT-WIDTH columns."
                   (last (car (last thread))))
               (goto-char (gnus-data-pos last))
               (forward-line 1)
-              (insert
-               (bs-gnus--summary-decoration-line
-                "" (gnus-data-number root) 'separator))
+              (unless (eobp)
+                (insert
+                 (bs-gnus--summary-decoration-line
+                  "" (gnus-data-number root) 'separator)))
               (goto-char (gnus-data-pos root))
               (beginning-of-line)
               (insert
