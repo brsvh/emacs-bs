@@ -33,6 +33,9 @@
 
 (declare-function mail-header-date "nnheader" (header))
 (declare-function mail-header-from "nnheader" (header))
+(declare-function mail-header-id "nnheader" (header))
+(declare-function mail-header-number "nnheader" (header))
+(declare-function mail-header-references "nnheader" (header))
 (declare-function mail-header-subject "nnheader" (header))
 (declare-function gnus-active "gnus-start" (group))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
@@ -53,6 +56,7 @@
 (declare-function gnus-summary-prepare "gnus-sum" ())
 (declare-function gnus-summary-prev-subject
                   "gnus-sum" (n &optional unread))
+(declare-function gnus-split-references "gnus-sum" (references))
 (declare-function gnus-group-list-groups
                   "gnus-group"
                   (&optional level unread lowest update-level))
@@ -71,13 +75,18 @@
 (defvar gnus-dormant-mark)
 (defvar gnus-auto-extend-newsgroup)
 (defvar gnus-newsgroup-cached)
+(defvar gnus-newsgroup-ancient)
 (defvar gnus-newsgroup-data)
+(defvar gnus-newsgroup-dependencies)
 (defvar gnus-newsgroup-forwarded)
+(defvar gnus-newsgroup-limit)
+(defvar gnus-newsgroup-limits)
 (defvar gnus-newsgroup-name)
 (defvar gnus-newsgroup-prepared)
 (defvar gnus-newsgroup-processable)
 (defvar gnus-newsgroup-replied)
 (defvar gnus-newsgroup-saved)
+(defvar gnus-newsgroup-sparse)
 (defvar gnus-newsgroup-undownloaded)
 (defvar gnus-newsgroup-unseen)
 (defvar gnus-group-list-mode)
@@ -129,6 +138,11 @@
   '((t :inherit (shadow bs-gnus-summary-label-face)
        :weight normal :slant normal :strike-through nil))
   "Face for article timestamps."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-context-face
+  '((t :inherit shadow :weight normal))
+  "Face for old articles displayed only to connect a thread."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-group-face
@@ -900,6 +914,71 @@ This is an emergency and debugging command, not a minor mode."
   "Return non-nil when DATA represents an unread article."
   (= (gnus-data-mark data) gnus-unread-mark))
 
+(defun bs-gnus--summary-context-article-p (article)
+  "Return non-nil when ARTICLE exists only as thread context."
+  (or (memq article gnus-newsgroup-ancient)
+      (memq article gnus-newsgroup-sparse)))
+
+(defun bs-gnus--summary-context-data-p (data)
+  "Return non-nil when DATA exists only to connect visible articles."
+  (bs-gnus--summary-context-article-p (gnus-data-number data)))
+
+(defun bs-gnus--summary-limit-with-context (articles)
+  "Return ARTICLES together with their available context ancestors."
+  (if (not (hash-table-p gnus-newsgroup-dependencies))
+      articles
+    (let ((headers (make-hash-table :test #'eql))
+          (ids (make-hash-table :test #'equal))
+          (included (make-hash-table :test #'eql))
+          pending result)
+      (maphash
+       (lambda (_id dependencies)
+         (when-let* ((header (car dependencies)))
+           (let ((number (mail-header-number header))
+                 (id (mail-header-id header)))
+             (puthash number header headers)
+             (when id
+               (puthash id number ids)))))
+       gnus-newsgroup-dependencies)
+      (dolist (article articles)
+        (unless (gethash article included)
+          (puthash article t included)
+          (push article pending)
+          (push article result)))
+      (while pending
+        (when-let* ((header (gethash (pop pending) headers))
+                    (references (mail-header-references header)))
+          (dolist (id (gnus-split-references references))
+            (when-let* ((article (gethash id ids))
+                        ((bs-gnus--summary-context-article-p article))
+                        ((not (gethash article included))))
+              (puthash article t included)
+              (push article pending)
+              (push article result)))))
+      (sort result #'<))))
+
+(defun bs-gnus--summary-limit-advice (function articles &optional pop)
+  "Keep thread context when FUNCTION applies an article limit.
+ARTICLES and POP have the meaning documented by `gnus-summary-limit'."
+  (when (and bs-gnus--summary-enabled
+             (derived-mode-p 'gnus-summary-mode))
+    (if pop
+        (when gnus-newsgroup-limits
+          (setcar
+           gnus-newsgroup-limits
+           (bs-gnus--summary-limit-with-context
+            (car gnus-newsgroup-limits))))
+      (setq articles
+            (bs-gnus--summary-limit-with-context articles))))
+  (funcall function articles pop))
+
+(defun bs-gnus--summary-cut-threads-advice (function threads)
+  "Keep context roots when FUNCTION would cut them from THREADS."
+  (if (and bs-gnus--summary-enabled
+           (derived-mode-p 'gnus-summary-mode))
+      (delq nil threads)
+    (funcall function threads)))
+
 (defun bs-gnus--summary-important-data-p (data)
   "Return non-nil when DATA should remain visible in a folded thread."
   (let ((number (gnus-data-number data))
@@ -923,15 +1002,27 @@ This is an emergency and debugging command, not a minor mode."
 
 (defun bs-gnus--summary-thread-unread-count (thread)
   "Return the number of unread articles in THREAD."
-  (cl-count-if #'bs-gnus--summary-unread-data-p thread))
+  (cl-count-if
+   (lambda (data)
+     (and (not (bs-gnus--summary-context-data-p data))
+          (bs-gnus--summary-unread-data-p data)))
+   thread))
 
-(defun bs-gnus--summary-thread-count-label (thread)
+(defun bs-gnus--summary-thread-count-label (thread &optional face)
   "Return the article-count label for THREAD."
-  (let ((total (length thread))
-        (unread (bs-gnus--summary-thread-unread-count thread)))
-    (if (> unread 0)
-        (format "%d/%d" unread total)
-      (number-to-string total))))
+  (let* ((context
+          (cl-count-if #'bs-gnus--summary-context-data-p thread))
+         (total (- (length thread) context))
+         (unread (bs-gnus--summary-thread-unread-count thread))
+         (label
+          (if (> unread 0)
+              (format "%d/%d" unread total)
+            (number-to-string total)))
+         (label
+          (concat label (and (> context 0) "+"))))
+    (if face
+        (propertize label 'face face)
+      label)))
 
 (defun bs-gnus--summary-thread-count-width (threads)
   "Return the widest article-count label in THREADS."
@@ -958,9 +1049,7 @@ Right-align its article count to COUNT-WIDTH columns."
               'bs-gnus-summary-unread-thread-count-face
             'bs-gnus-summary-thread-count-face))
          (label
-          (propertize
-           (bs-gnus--summary-thread-count-label thread)
-           'face count-face))
+          (bs-gnus--summary-thread-count-label thread count-face))
          (count
           (concat
            (make-string
@@ -1006,9 +1095,15 @@ Right-align its article count to COUNT-WIDTH columns."
   (remove-overlays
    (point-min) (point-max) 'bs-gnus-fold-overlay t))
 
+(defun bs-gnus--summary-remove-context-overlays ()
+  "Remove context overlays owned by the custom Summary renderer."
+  (remove-overlays
+   (point-min) (point-max) 'bs-gnus-context-overlay t))
+
 (defun bs-gnus--summary-remove-decorations ()
   "Remove custom title and separator lines from the current buffer."
   (bs-gnus--summary-remove-fold-overlays)
+  (bs-gnus--summary-remove-context-overlays)
   (let ((inhibit-read-only t))
     (goto-char (point-min))
     (while (not (eobp))
@@ -1080,6 +1175,22 @@ Right-align its article count to COUNT-WIDTH columns."
         (when (gethash article bs-gnus--summary-fold-state)
           (bs-gnus--summary-apply-fold article thread))))))
 
+(defun bs-gnus--summary-apply-context-faces ()
+  "Visually weaken articles displayed only as thread context."
+  (bs-gnus--summary-remove-context-overlays)
+  (dolist (data gnus-newsgroup-data)
+    (when (bs-gnus--summary-context-data-p data)
+      (save-excursion
+        (goto-char (gnus-data-pos data))
+        (let ((overlay
+               (make-overlay
+                (line-beginning-position)
+                (line-end-position)
+                nil t nil)))
+          (overlay-put overlay 'face 'bs-gnus-summary-context-face)
+          (overlay-put overlay 'evaporate t)
+          (overlay-put overlay 'bs-gnus-context-overlay t))))))
+
 (defun bs-gnus--summary-restore-selection (article)
   "Restore point to ARTICLE when it remains available."
   (when (and article
@@ -1128,6 +1239,7 @@ Right-align its article count to COUNT-WIDTH columns."
             (gnus-data-number first)
             'group-summary)))
         (gnus-data-compute-positions)
+        (bs-gnus--summary-apply-context-faces)
         (bs-gnus--summary-apply-folds threads))
       (setq bs-gnus--summary-render-width width
             bs-gnus--summary-rendered t
@@ -1137,7 +1249,8 @@ Right-align its article count to COUNT-WIDTH columns."
 (defun bs-gnus--summary-reset-render-state ()
   "Reset transient render state before Gnus builds a Summary."
   (setq bs-gnus--summary-rendered nil)
-  (bs-gnus--summary-remove-fold-overlays))
+  (bs-gnus--summary-remove-fold-overlays)
+  (bs-gnus--summary-remove-context-overlays))
 
 (defun bs-gnus--summary-run-decoration (buffer)
   "Decorate Summary BUFFER after a debounced update."
@@ -1417,6 +1530,12 @@ Return non-nil when the Summary gained at least one article."
             :unbound))
     (fset 'gnus-user-format-function-b
           #'bs-gnus-summary-format-message)
+    (advice-add
+     'gnus-cut-threads
+     :around #'bs-gnus--summary-cut-threads-advice)
+    (advice-add
+     'gnus-summary-limit
+     :around #'bs-gnus--summary-limit-advice)
     (add-hook 'gnus-summary-mode-hook
               #'bs-gnus--summary-configure-buffer)
     (add-hook 'gnus-summary-generate-hook
@@ -1453,6 +1572,12 @@ This is an emergency and debugging command, not a minor mode."
                  #'bs-gnus--summary-schedule-decoration)
     (remove-hook 'window-size-change-functions
                  #'bs-gnus--summary-window-size-change)
+    (advice-remove
+     'gnus-cut-threads
+     #'bs-gnus--summary-cut-threads-advice)
+    (advice-remove
+     'gnus-summary-limit
+     #'bs-gnus--summary-limit-advice)
     (if (eq bs-gnus--summary-original-user-format-function :unbound)
         (fmakunbound 'gnus-user-format-function-b)
       (fset 'gnus-user-format-function-b
