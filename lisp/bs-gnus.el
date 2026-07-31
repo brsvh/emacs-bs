@@ -248,6 +248,13 @@ A value of zero disables batch insertion without changing
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-group-source-names nil
+  "Alist mapping NNTP server addresses to Group buffer source labels.
+Each element has the form (ADDRESS . NAME).  NNTP servers absent
+from the alist use the label `Usenet'."
+  :type '(alist :key-type string :value-type string)
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-group-fallback-width 100
   "Width used when a Group buffer has no live window."
   :type 'natnum
@@ -340,12 +347,20 @@ A value of zero disables batch insertion without changing
 
 (defun bs-gnus--group-source (group)
   "Return the concise source label for GROUP."
-  (cond
-   ((string-prefix-p "nntp+gmane:" group) "Gmane")
-   ((or (not (string-match-p "\\`nn" group))
-        (string-match-p "\\`nntp\\(?:\\+[^:]+\\)?:" group))
-    "Usenet")
-   (t "Local")))
+  (let* ((method (gnus-find-method-for-group group))
+         (address
+          (or (cadr (assq 'nntp-address (cddr method)))
+              (nth 1 method)))
+         (name
+          (and address
+               (cdr
+                (assoc-string
+                 address bs-gnus-group-source-names t)))))
+    (cond
+     (name name)
+     ((eq (car method) 'nntp)
+      "Usenet")
+     (t "Local"))))
 
 (defun bs-gnus--group-display-name (group)
   "Return the display name for GROUP."
