@@ -147,8 +147,29 @@
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-group-face
-  '((t :inherit default :weight bold))
-  "Face for the group summary line."
+  '((t :inherit default :height 1.30 :weight bold))
+  "Face for labels and sources on a Summary overview line."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-group-name-face
+  '((t :inherit bs-gnus-summary-title-face
+       :height 1.30 :weight bold :slant italic))
+  "Face for the group name on a Summary overview line."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-group-unread-face
+  '((t :inherit error :weight semibold))
+  "Face for nonzero unread counts on Summary overview lines."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-group-empty-unread-face
+  '((t :inherit shadow))
+  "Face for zero unread counts on Summary overview lines."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-group-loaded-face
+  '((t :inherit success))
+  "Face for loaded article counts on Summary overview lines."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-fold-indicator-face
@@ -222,7 +243,8 @@
   :group 'bs-gnus)
 
 (defcustom bs-gnus-summary-thread-count-digits 4
-  "Minimum decimal digits reserved for thread article counts."
+  "Minimum columns reserved for complete thread article-count labels.
+The width includes separators and a trailing context marker."
   :type 'natnum
   :group 'bs-gnus)
 
@@ -265,10 +287,10 @@ from the alist use the label `Usenet'."
   :type 'number
   :group 'bs-gnus)
 
-(defconst bs-gnus--summary-line-format " %U%R%O%z%* %ub\n"
+(defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
 
-(defconst bs-gnus--summary-prefix-width 6
+(defconst bs-gnus--summary-prefix-width 10
   "Columns reserved before the thread-tree prefix.")
 
 (defconst bs-gnus--summary-setting-symbols
@@ -1145,17 +1167,60 @@ Right-align its article count to COUNT-WIDTH columns."
      'font-lock-face 'bs-gnus-summary-title-face line)
     line))
 
-(defun bs-gnus--summary-group-line ()
-  "Return a group summary for the current Summary buffer."
-  (let* ((total (length gnus-newsgroup-data))
+(defun bs-gnus--summary-right-padding (string)
+  "Return padding that right-aligns STRING with Summary timestamps."
+  (propertize
+   " "
+   'display
+   `(space
+     :align-to
+     (- right
+        (+ (,(string-pixel-width string)) 1)))))
+
+(defun bs-gnus--summary-group-line (width)
+  "Return a group overview fitted to WIDTH for the current Summary."
+  (let* ((loaded (length gnus-newsgroup-data))
+         (total (bs-gnus--group-total gnus-newsgroup-name))
          (unread
           (cl-count-if
            #'bs-gnus--summary-unread-data-p
-           gnus-newsgroup-data)))
-    (propertize
-     (format "GROUP (%d/%d): %S"
-             unread total gnus-newsgroup-name)
-     'face 'bs-gnus-summary-group-face)))
+           gnus-newsgroup-data))
+         (unread-string (number-to-string unread))
+         (statistics
+          (concat
+           (propertize
+            unread-string
+            'face
+            (if (> unread 0)
+                'bs-gnus-summary-group-unread-face
+              'bs-gnus-summary-group-empty-unread-face))
+           " unread · "
+           (propertize
+            (number-to-string loaded)
+            'face 'bs-gnus-summary-group-loaded-face)
+           " loaded · "
+           (number-to-string total)
+           " total"))
+         (identity
+          (concat
+           (propertize
+            "  GROUP " 'face 'bs-gnus-summary-group-face)
+           (propertize
+            (bs-gnus--group-display-name gnus-newsgroup-name)
+            'face 'bs-gnus-summary-group-name-face)
+           (propertize
+            (format
+             " (%s)"
+             (bs-gnus--group-source gnus-newsgroup-name))
+            'face 'bs-gnus-summary-group-face)))
+         (identity
+          (bs-gnus--summary-truncate
+           identity
+           (max 0 (- width (string-width statistics) 2)))))
+    (concat
+     identity
+     (bs-gnus--summary-right-padding statistics)
+     statistics)))
 
 (defun bs-gnus--summary-decoration-line (string article kind)
   "Return a decoration line containing STRING for ARTICLE and KIND."
@@ -1175,10 +1240,46 @@ Right-align its article count to COUNT-WIDTH columns."
   (remove-overlays
    (point-min) (point-max) 'bs-gnus-context-overlay t))
 
+(defun bs-gnus--summary-remove-mark-alignment ()
+  "Remove display spacing used to align Summary mark columns."
+  (let ((limit (point-max))
+        (position (point-min)))
+    (while (setq position
+                 (text-property-any
+                  position limit 'bs-gnus-mark-alignment t))
+      (let ((end
+             (next-single-property-change
+              position 'bs-gnus-mark-alignment nil limit)))
+        (remove-text-properties
+         position end
+         '(bs-gnus-mark-alignment nil display nil))
+        (setq position end)))))
+
+(defun bs-gnus--summary-align-mark-columns ()
+  "Right-align article marks with thread count labels."
+  (bs-gnus--summary-remove-mark-alignment)
+  (dolist (data gnus-newsgroup-data)
+    (save-excursion
+      (goto-char (gnus-data-pos data))
+      (let ((start (line-beginning-position))
+            (end (line-end-position)))
+        (when (and (< (+ start 8) end)
+                   (eq (char-after (+ start 3)) ?\s)
+                   (eq (char-after (+ start 8)) ?\s))
+          (add-text-properties
+           (+ start 3) (+ start 4)
+           '(bs-gnus-mark-alignment t
+                                    display (space :width 1.5)))
+          (add-text-properties
+           (+ start 8) (+ start 9)
+           '(bs-gnus-mark-alignment t
+                                    display (space :width 0.5))))))))
+
 (defun bs-gnus--summary-remove-decorations ()
   "Remove custom title and separator lines from the current buffer."
   (bs-gnus--summary-remove-fold-overlays)
   (bs-gnus--summary-remove-context-overlays)
+  (bs-gnus--summary-remove-mark-alignment)
   (let ((inhibit-read-only t))
     (goto-char (point-min))
     (while (not (eobp))
@@ -1288,6 +1389,7 @@ Right-align its article count to COUNT-WIDTH columns."
         (bs-gnus--summary-remove-decorations)
         (bs-gnus--summary-apply-correspondent-faces)
         (gnus-data-compute-positions)
+        (bs-gnus--summary-align-mark-columns)
         (let ((count-width
                (bs-gnus--summary-thread-count-width threads)))
           (dolist (thread (reverse threads))
@@ -1311,7 +1413,7 @@ Right-align its article count to COUNT-WIDTH columns."
         (when-let* ((first (car gnus-newsgroup-data)))
           (insert
            (bs-gnus--summary-decoration-line
-            (concat (bs-gnus--summary-group-line) "\n")
+            (concat "\n" (bs-gnus--summary-group-line width) "\n")
             (gnus-data-number first)
             'group-summary)))
         (gnus-data-compute-positions)
