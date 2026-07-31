@@ -4,7 +4,7 @@
 
 ;; Author: Bingshan Chang <chang@bingshan.org>
 ;; Keywords: extensions
-;; Package-Requires: ((emacs "30.1") (khalel "0.1.16") (mu4e "1.14.2") (tabspaces "1.7"))
+;; Package-Requires: ((edit-indirect "20240128.119") (emacs "30.1") (khalel "0.1.16") (mu4e "1.14.2") (tabspaces "1.7"))
 ;; Version: 0.1.0
 
 ;; This file is not part of GNU Emacs.
@@ -30,6 +30,7 @@
 
 (require 'bs-lib)
 (require 'bs-ext)
+(require 'bs-edit-indirect)
 (require 'bs-hooks)
 (require 'bs-khal)
 (require 'bs-contacts)

@@ -59,6 +59,7 @@
 
                 emacs-bs =
                   {
+                    edit-indirect,
                     khalel,
                     lib,
                     melpaBuild,
@@ -77,6 +78,7 @@
                     files = ''("bs.el" "bs-*.el")'';
 
                     packageRequires = [
+                      edit-indirect
                       khalel
                       mu4e
                       tabspaces
