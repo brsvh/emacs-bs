@@ -44,18 +44,15 @@
 (declare-function gnus-data-mark "gnus-sum" (data))
 (declare-function gnus-data-number "gnus-sum" (data))
 (declare-function gnus-data-pos "gnus-sum" (data))
+(declare-function gnus-highlight-selected-summary "gnus-sum" ())
 (declare-function gnus-summary-article-number "gnus-sum" ())
 (declare-function gnus-summary-goto-subject
                   "gnus-sum" (article &optional force silent))
 (declare-function gnus-summary-insert-old-articles
                   "gnus-sum" (&optional all))
 (declare-function gnus-summary-insert-new-articles "gnus-sum" ())
-(declare-function gnus-summary-next-subject
-                  "gnus-sum" (n &optional unread dont-display))
-(declare-function gnus-summary-position-point "gnus-sum" ())
 (declare-function gnus-summary-prepare "gnus-sum" ())
-(declare-function gnus-summary-prev-subject
-                  "gnus-sum" (n &optional unread))
+(declare-function gnus-summary-recenter "gnus-sum" ())
 (declare-function gnus-split-references "gnus-sum" (references))
 (declare-function gnus-group-list-groups
                   "gnus-group"
@@ -70,6 +67,9 @@
                   "gnus-spec"
                   (&optional force type1 type2 type3 type4))
 (declare-function gnus-update-summary-mark-positions "gnus-sum" ())
+(declare-function gnus-article-read-summary-keys
+                  "gnus-art"
+                  (&optional arg key not-restore-window))
 (declare-function nntp-list-active-group
                   "nntp" (group &optional server))
 
@@ -304,11 +304,17 @@ from the alist use the label `Usenet'."
 (defvar bs-gnus--summary-enabled nil
   "Non-nil when the custom Summary renderer is installed.")
 
+(defvar bs-gnus--summary-navigation-from-article nil
+  "Non-nil while an Article buffer delegates a Summary command.")
+
 (defvar bs-gnus--summary-original-user-format-function nil
   "Saved definition of `gnus-user-format-function-b'.")
 
 (defvar-local bs-gnus--summary-decoration-timer nil
   "Idle timer used to debounce Summary decoration.")
+
+(defvar-local bs-gnus--summary-context-prefixes nil
+  "Omitted thread-prefix headers keyed by the retained root article.")
 
 (defvar-local bs-gnus--summary-fold-state nil
   "Hash table containing article numbers whose replies are folded.")
@@ -1108,11 +1114,46 @@ ARTICLES and POP have the meaning documented by `gnus-summary-limit'."
             (bs-gnus--summary-limit-with-context articles))))
   (funcall function articles pop))
 
+(defun bs-gnus--summary-thread-subtree-path (thread target)
+  "Return the headers leading from THREAD to TARGET.
+The return value begins with a non-nil sentinel, followed by the
+headers preceding TARGET.  Return nil when TARGET is not a subtree
+of THREAD."
+  (cond
+   ((eq thread target)
+    (list t))
+   ((consp thread)
+    (cl-loop
+     for child in (cdr thread)
+     for path = (bs-gnus--summary-thread-subtree-path child target)
+     when path
+     return (cons t (cons (car thread) (cdr path)))))))
+
 (defun bs-gnus--summary-cut-threads-advice (function threads)
-  "Keep context roots when FUNCTION would cut them from THREADS."
+  "Call FUNCTION on THREADS and remember omitted context roots."
   (if (and bs-gnus--summary-enabled
            (derived-mode-p 'gnus-summary-mode))
-      (delq nil threads)
+      (let* ((originals (copy-sequence threads))
+             (cut-threads (funcall function threads)))
+        (setq bs-gnus--summary-context-prefixes
+              (make-hash-table :test #'eql))
+        (dolist (thread cut-threads)
+          (when (mail-header-p (car-safe thread))
+            (when-let*
+                ((path
+                  (cl-loop
+                   for original in originals
+                   for candidate =
+                   (bs-gnus--summary-thread-subtree-path
+                    original thread)
+                   when candidate return candidate))
+                 (headers
+                  (cl-remove-if-not #'mail-header-p (cdr path))))
+              (puthash
+               (mail-header-number (car thread))
+               headers
+               bs-gnus--summary-context-prefixes))))
+        cut-threads)
     (funcall function threads)))
 
 (defun bs-gnus--summary-important-data-p (data)
@@ -1148,6 +1189,12 @@ ARTICLES and POP have the meaning documented by `gnus-summary-limit'."
   "Return the article-count label for THREAD."
   (let* ((context
           (cl-count-if #'bs-gnus--summary-context-data-p thread))
+         (omitted
+          (length
+           (and (hash-table-p bs-gnus--summary-context-prefixes)
+                (gethash
+                 (gnus-data-number (car thread))
+                 bs-gnus--summary-context-prefixes))))
          (total (- (length thread) context))
          (unread (bs-gnus--summary-thread-unread-count thread))
          (label
@@ -1155,7 +1202,7 @@ ARTICLES and POP have the meaning documented by `gnus-summary-limit'."
               (format "%d/%d" unread total)
             (number-to-string total)))
          (label
-          (concat label (and (> context 0) "+"))))
+          (concat label (and (> (+ context omitted) 0) "+"))))
     (if face
         (propertize label 'face face)
       label)))
@@ -1268,6 +1315,45 @@ Right-align its article count to COUNT-WIDTH columns."
    'bs-gnus-decoration kind
    'gnus-intangible article
    'rear-nonsticky t))
+
+(defun bs-gnus--summary-context-line (header width)
+  "Return an unselectable context line for HEADER fitted to WIDTH."
+  (let* ((prefix
+          (concat
+           (make-string bs-gnus--summary-prefix-width ?\s)
+           "… "))
+         (date (bs-gnus--summary-date header))
+         (name
+          (bs-gnus--summary-contact-name
+           (mail-header-from header)))
+         (available
+          (max
+           0
+           (- width
+              (string-width prefix)
+              (string-width date)
+              1)))
+         (name (bs-gnus--summary-truncate name available))
+         (padding
+          (make-string
+           (max 1 (- available (string-width name)))
+           ?\s)))
+    (propertize
+     (concat prefix name padding date)
+     'face 'bs-gnus-summary-context-face)))
+
+(defun bs-gnus--summary-thread-context-lines (thread width)
+  "Return omitted context lines for THREAD fitted to WIDTH."
+  (when (hash-table-p bs-gnus--summary-context-prefixes)
+    (when-let*
+        ((headers
+          (gethash
+           (gnus-data-number (car thread))
+           bs-gnus--summary-context-prefixes)))
+      (mapconcat
+       (lambda (header)
+         (bs-gnus--summary-context-line header width))
+       headers "\n"))))
 
 (defun bs-gnus--summary-remove-fold-overlays ()
   "Remove fold overlays owned by the custom Summary renderer."
@@ -1410,16 +1496,30 @@ Right-align its article count to COUNT-WIDTH columns."
   "Restore point to ARTICLE when it remains available."
   (when (and article
              (gnus-summary-goto-subject article nil t))
-    (gnus-summary-position-point)))
+    (bs-gnus--summary-position-point)
+    (let ((position (point)))
+      (dolist (window (get-buffer-window-list (current-buffer) nil t))
+        (set-window-point window position))))
+  (when gnus-current-article
+    (save-excursion
+      (when (gnus-summary-goto-subject
+             gnus-current-article nil t)
+        (gnus-highlight-selected-summary)))))
+
+(defun bs-gnus--summary-selection-article ()
+  "Return the Summary article whose point should survive a render."
+  (let ((point-article
+         (get-text-property (point) 'gnus-number)))
+    (if (eq (window-buffer (selected-window)) (current-buffer))
+        (or point-article gnus-current-article)
+      (or gnus-current-article point-article))))
 
 (defun bs-gnus--summary-decorate ()
   "Decorate the current native Gnus Summary buffer."
   (when (and bs-gnus--summary-enabled
              bs-gnus--summary-original-settings
              (derived-mode-p 'gnus-summary-mode))
-    (let ((article
-           (or (get-text-property (point) 'gnus-number)
-               gnus-current-article))
+    (let ((article (bs-gnus--summary-selection-article))
           (threads (bs-gnus--summary-threads))
           (width (bs-gnus--summary-width))
           (inhibit-read-only t))
@@ -1447,7 +1547,16 @@ Right-align its article count to COUNT-WIDTH columns."
                 (bs-gnus--summary-thread-title
                  thread width count-width)
                 (gnus-data-number root)
-                'thread-title)))))
+                'thread-title))
+              (when-let*
+                  ((context
+                    (bs-gnus--summary-thread-context-lines
+                     thread width)))
+                (insert
+                 (bs-gnus--summary-decoration-line
+                  context
+                  (gnus-data-number root)
+                  'thread-context))))))
         (goto-char (point-min))
         (when-let* ((first (car gnus-newsgroup-data)))
           (insert
@@ -1497,9 +1606,7 @@ Right-align its article count to COUNT-WIDTH columns."
                  gnus-newsgroup-prepared
                  (get-buffer-window buffer t))
         (let ((width (bs-gnus--summary-width))
-              (article
-               (or (get-text-property (point) 'gnus-number)
-                   gnus-current-article)))
+              (article (bs-gnus--summary-selection-article)))
           (unless (equal width bs-gnus--summary-render-width)
             (gnus-summary-prepare)
             (bs-gnus--summary-restore-selection article)))))))
@@ -1651,6 +1758,80 @@ Right-align its article count to COUNT-WIDTH columns."
   "Return non-nil when the current buffer is a Gnus Summary buffer."
   (derived-mode-p 'gnus-summary-mode))
 
+(defun bs-gnus--summary-position-point ()
+  "Position point at the start of custom Summary row contents."
+  (beginning-of-line)
+  (move-to-column bs-gnus--summary-prefix-width))
+
+(defun bs-gnus--article-read-summary-keys-advice
+    (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS as an Article-originated command."
+  (let ((bs-gnus--summary-navigation-from-article t))
+    (apply function arguments)))
+
+(defun bs-gnus--summary-sync-article-navigation ()
+  "Start Article-originated navigation at the displayed article."
+  (when (and bs-gnus--summary-navigation-from-article
+             gnus-current-article
+             (gnus-summary-goto-subject
+              gnus-current-article nil t))
+    (bs-gnus--summary-position-point)))
+
+(defun bs-gnus--summary-find-visible-article (direction)
+  "Move to the next visible real article in DIRECTION.
+DIRECTION is 1 for following lines and -1 for preceding lines.
+Return the article number, or nil at the buffer boundary."
+  (let (article)
+    (while (and (not article)
+                (zerop (forward-line direction)))
+      (let ((number
+             (get-text-property
+              (line-beginning-position) 'gnus-number)))
+        (when (and (integerp number)
+                   (> number 0)
+                   (not (invisible-p (line-beginning-position))))
+          (setq article number))))
+    (when article
+      (bs-gnus--summary-position-point))
+    article))
+
+(defun bs-gnus--summary-extend-at-boundary (direction)
+  "Extend the Summary at its boundary in DIRECTION."
+  (when gnus-auto-extend-newsgroup
+    (if (> direction 0)
+        (and (> bs-gnus-summary-auto-extend-count 0)
+             (bs-gnus--summary-extend-old-articles))
+      (bs-gnus--summary-extend-new-articles))))
+
+(defun bs-gnus--summary-move-visible-articles (count direction)
+  "Move COUNT visible articles in DIRECTION.
+Return the number of requested steps that could not be completed."
+  (let* ((direction
+          (* direction (if (< count 0) -1 1)))
+         (remaining (abs count))
+         (moved 0))
+    (while
+        (and
+         (> remaining 0)
+         (or
+          (bs-gnus--summary-find-visible-article direction)
+          (let (article)
+            (while (and (not article)
+                        (bs-gnus--summary-extend-at-boundary
+                         direction))
+              (setq article
+                    (bs-gnus--summary-find-visible-article
+                     direction)))
+            article)))
+      (setq remaining (1- remaining)))
+    (setq moved (- (abs count) remaining))
+    (when (> moved 0)
+      (gnus-summary-recenter)
+      (bs-gnus--summary-position-point))
+    (when (> remaining 0)
+      (gnus-message 7 "No more articles"))
+    remaining))
+
 (defun bs-gnus--summary-extend-old-articles ()
   "Insert a batch of older articles and preserve the current article.
 Return non-nil when the Summary gained at least one article."
@@ -1678,15 +1859,8 @@ Return non-nil when the Summary gained at least one article."
   (interactive "p")
   (unless (bs-gnus--summary-article-buffer-p)
     (user-error "This command requires a Gnus Summary buffer"))
-  (let ((remaining
-         (gnus-summary-next-subject (or count 1))))
-    (while (and (> remaining 0)
-                gnus-auto-extend-newsgroup
-                (> bs-gnus-summary-auto-extend-count 0)
-                (bs-gnus--summary-extend-old-articles))
-      (setq remaining
-            (gnus-summary-next-subject remaining)))
-    remaining))
+  (bs-gnus--summary-sync-article-navigation)
+  (bs-gnus--summary-move-visible-articles (or count 1) 1))
 
 ;;;###autoload
 (defun bs-gnus-summary-previous (&optional count)
@@ -1694,14 +1868,8 @@ Return non-nil when the Summary gained at least one article."
   (interactive "p")
   (unless (bs-gnus--summary-article-buffer-p)
     (user-error "This command requires a Gnus Summary buffer"))
-  (let ((remaining
-         (gnus-summary-prev-subject (or count 1))))
-    (when (and (> remaining 0)
-               gnus-auto-extend-newsgroup
-               (bs-gnus--summary-extend-new-articles))
-      (setq remaining
-            (gnus-summary-prev-subject remaining)))
-    remaining))
+  (bs-gnus--summary-sync-article-navigation)
+  (bs-gnus--summary-move-visible-articles (or count 1) -1))
 
 ;;;###autoload
 (defun bs-gnus-summary-fold-toggle ()
@@ -1753,6 +1921,9 @@ Return non-nil when the Summary gained at least one article."
     (advice-add
      'gnus-summary-limit
      :around #'bs-gnus--summary-limit-advice)
+    (advice-add
+     'gnus-article-read-summary-keys
+     :around #'bs-gnus--article-read-summary-keys-advice)
     (add-hook 'gnus-summary-mode-hook
               #'bs-gnus--summary-configure-buffer)
     (add-hook 'gnus-summary-generate-hook
@@ -1795,6 +1966,9 @@ This is an emergency and debugging command, not a minor mode."
     (advice-remove
      'gnus-summary-limit
      #'bs-gnus--summary-limit-advice)
+    (advice-remove
+     'gnus-article-read-summary-keys
+     #'bs-gnus--article-read-summary-keys-advice)
     (if (eq bs-gnus--summary-original-user-format-function :unbound)
         (fmakunbound 'gnus-user-format-function-b)
       (fset 'gnus-user-format-function-b
