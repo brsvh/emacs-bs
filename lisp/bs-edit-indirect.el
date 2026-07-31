@@ -81,6 +81,25 @@
    (t
     (user-error "Current buffer is not in a Markdown mode"))))
 
+(defun bs-edit-indirect--nix-literal-string-content-bounds (bounds)
+  "Return content BOUNDS without delimiter-only lines."
+  (let ((beg (car bounds))
+        (end (cdr bounds)))
+    (when (and (< beg end)
+               (eq (char-after beg) ?\n))
+      (setq beg (1+ beg)))
+    (save-excursion
+      (goto-char end)
+      (let ((line-beg (line-beginning-position)))
+        (when (and (< beg end)
+                   (> line-beg (point-min))
+                   (eq (char-before line-beg) ?\n)
+                   (string-match-p
+                    "\\`[ \t]*\\'"
+                    (buffer-substring-no-properties line-beg end)))
+          (setq end (max beg (1- line-beg))))))
+    (cons beg end)))
+
 ;;;###autoload
 (defun bs-edit-indirect-nix-literal-string ()
   "Edit the Nix literal string at point indirectly."
@@ -109,6 +128,9 @@
                  (cons (+ start 2) (- (point) 2))))))))
     (unless bounds
       (user-error "Point is not in a Nix literal string"))
+    (setq bounds
+          (bs-edit-indirect--nix-literal-string-content-bounds
+           bounds))
     (let ((edit-indirect-guess-mode-function
            (lambda (_parent-buffer _beg _end)
              (fundamental-mode))))
