@@ -70,6 +70,8 @@
                   "gnus-spec"
                   (&optional force type1 type2 type3 type4))
 (declare-function gnus-update-summary-mark-positions "gnus-sum" ())
+(declare-function nntp-list-active-group
+                  "nntp" (group &optional server))
 
 (defvar gnus-current-article)
 (defvar gnus-dormant-mark)
@@ -98,6 +100,7 @@
 (defvar gnus-tmp-thread-tree-header-string)
 (defvar gnus-tmp-unread)
 (defvar gnus-unread-mark)
+(defvar nntp-server-buffer)
 
 (defgroup bs-gnus nil
   "Personal Gnus extensions."
@@ -334,7 +337,43 @@ from the alist use the label `Usenet'."
 (defvar-local bs-gnus--group-resize-timer nil
   "Idle timer used to debounce Group buffer resize rendering.")
 
+(defvar bs-gnus--group-posting-status-cache
+  (make-hash-table :test #'equal)
+  "NNTP posting statuses cached by full Gnus group name.")
+
 (put 'bs-gnus--summary-fold-state 'permanent-local t)
+
+;;;###autoload
+(defun bs-gnus-group-posting-status (group &optional refresh)
+  "Return the NNTP posting status for GROUP.
+The result is one of the characters `?y', `?m', or `?n', as
+reported by `LIST ACTIVE'.  GROUP is a full Gnus group name.
+Reuse a status cached during this Emacs session unless REFRESH is
+non-nil."
+  (or (and (not refresh)
+           (gethash group bs-gnus--group-posting-status-cache))
+      (let* ((method (gnus-find-method-for-group group))
+             (backend (car method))
+             (server (cadr method))
+             (real-group (gnus-group-real-name group)))
+        (unless (eq backend 'nntp)
+          (user-error "%s is not an NNTP group" group))
+        (require 'nntp)
+        (unless (nntp-list-active-group real-group server)
+          (user-error "Cannot query the posting status of %s" group))
+        (with-current-buffer nntp-server-buffer
+          (goto-char (point-min))
+          (unless (re-search-forward
+                   (concat
+                    "^" (regexp-quote real-group)
+                    "[\t ]+[0-9]+[\t ]+[0-9]+[\t ]+"
+                    "\\([ymn]\\)[\t ]*\r?$")
+                   nil t)
+            (user-error "Unknown posting status for %s" group))
+          (let ((status (string-to-char (match-string 1))))
+            (puthash group status
+                     bs-gnus--group-posting-status-cache)
+            status)))))
 
 (defun bs-gnus--group-window ()
   "Return a window suitable for sizing the current Group buffer."
