@@ -50,8 +50,11 @@
 (declare-function mu4e-mark-restore "mu4e-mark" (docid))
 (declare-function mu4e-message-field "mu4e-message")
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
+(declare-function mu4e-message-readable-path
+                  "mu4e-message" (&optional msg))
 (declare-function mu4e-search-rerun "mu4e-search" ())
 (declare-function mu4e--view-html-displayed-p "mu4e-view" ())
+(declare-function mu4e--view-render-buffer "mu4e-view" (msg))
 (declare-function mu4e-action-view-in-browser
                   "mu4e-view" (msg &optional skip-headers))
 (declare-function mu4e-view "mu4e-view" (msg))
@@ -74,6 +77,8 @@
 
 (defvar browse-url-browser-function)
 (defvar browse-url-handlers)
+(defvar gnus-inhibit-mime-unbuttonizing)
+(defvar gnus-unbuttonized-mime-types)
 (defvar mail-mode-map)
 (defvar message-completion-alist)
 (defvar message-mode-map)
@@ -98,6 +103,7 @@
 (defvar mu4e-search-threads)
 (defvar mu4e-update-func)
 (defvar mu4e-use-fancy-chars)
+(defvar mu4e-view-fields)
 (defvar mu4e-view-rendered-hook)
 (defvar mu4e~headers-hidden)
 (defvar mu4e~headers-docid-pre)
@@ -172,6 +178,21 @@
 (defcustom bs-mu4e-headers-thread-count-padding 0.5
   "Colored padding beside thread message counts, in character widths."
   :type 'number
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-display-thread-context nil
+  "Whether to display the generated thread context buffer.
+When nil, keep `*Thread Context*' hidden and select the current
+Headers row.  When non-nil, display that buffer and select all of
+its text."
+  :type 'boolean
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-thread-context-hook nil
+  "Hook run after preparing a Mu4e thread context.
+The hook runs in the originating Headers buffer while
+`*Thread Context*' contains the selected subthread."
+  :type 'hook
   :group 'bs-mu4e)
 
 (defcustom bs-mu4e-ignored-contact-local-part-regexp
@@ -755,6 +776,9 @@ delegates all other fields to FUNCTION."
     (,(kbd "TAB") . bs-mu4e-headers-fold-toggle)
     (,(kbd "<tab>") . bs-mu4e-headers-fold-toggle))
   "Bindings installed in `mu4e-headers-mode-map'.")
+
+(defconst bs-mu4e--headers-thread-context-buffer "*Thread Context*"
+  "Buffer containing the most recently prepared thread context.")
 
 (defvar bs-mu4e--headers-enabled nil
   "Non-nil when the custom headers renderer is installed.")
@@ -1666,6 +1690,80 @@ Search backwards when BACKWARDS is non-nil."
         (remhash docid bs-mu4e--headers-fold-state)
       (puthash docid t bs-mu4e--headers-fold-state))
     (bs-mu4e--headers-rerender-thread thread docid)))
+
+(defun bs-mu4e--headers-render-message (msg)
+  "Return human-readable rendered text for MSG."
+  (require 'mu4e-view)
+  (with-temp-buffer
+    (insert-file-contents-literally
+     (mu4e-message-readable-path msg) nil nil nil t)
+    (let ((gnus-inhibit-mime-unbuttonizing nil)
+          (gnus-unbuttonized-mime-types '(".*/.*"))
+          (mu4e-view-fields '(:from :to :cc :subject :date)))
+      (mu4e--view-render-buffer msg)
+      (string-trim-right
+       (buffer-substring-no-properties
+        (point-min) (point-max))))))
+
+(defun bs-mu4e--headers-build-thread-context (messages query)
+  "Build a thread context for MESSAGES from Mu4e QUERY."
+  (let ((texts (mapcar #'bs-mu4e--headers-render-message messages))
+        (count (length messages)))
+    (with-current-buffer
+        (get-buffer-create bs-mu4e--headers-thread-context-buffer)
+      (fundamental-mode)
+      (erase-buffer)
+      (insert "# Thread Context\n\n"
+              (format "Source: Mu4e query `%s`\n\n" query)
+              (format "Messages: %d\n" count))
+      (cl-loop for text in texts
+               for index from 1
+               do (insert (format "\n## Message %d of %d\n\n"
+                                  index count)
+                          text "\n"))
+      (set-buffer-modified-p nil)
+      (current-buffer))))
+
+;;;###autoload
+(defun bs-mu4e-headers-mark-subthread ()
+  "Prepare the message at point and its replies as thread context.
+Render every message before replacing `*Thread Context*'.  Keep
+that buffer hidden by default, select the current Headers row,
+and run `bs-mu4e-headers-thread-context-hook'."
+  (interactive)
+  (unless (and (derived-mode-p 'mu4e-headers-mode)
+               bs-mu4e--headers-initialized)
+    (user-error "The custom Mu4e Headers renderer is not active"))
+  (unless bs-mu4e--headers-search-complete
+    (user-error "The current Mu4e search is not complete"))
+  (let* ((msg (mu4e-message-at-point 'noerror))
+         (docid (and msg (mu4e-message-field msg :docid)))
+         (found (and docid (bs-mu4e--headers-find-message docid)))
+         (thread (car-safe found))
+         (anchor (cdr-safe found))
+         (messages
+          (and anchor
+               (cons anchor
+                     (bs-mu4e--headers-descendants
+                      anchor thread))))
+         (query (bs-mu4e--headers-query)))
+    (unless anchor
+      (user-error "No Mu4e message thread at point"))
+    (let ((context
+           (bs-mu4e--headers-build-thread-context
+            messages query)))
+      (mu4e~headers-goto-docid docid)
+      (run-hooks 'bs-mu4e-headers-thread-context-hook)
+      (if bs-mu4e-headers-display-thread-context
+          (progn
+            (pop-to-buffer context)
+            (goto-char (point-min))
+            (push-mark (point-max) nil t))
+        (mu4e~headers-goto-docid docid t)
+        (push-mark (line-end-position) nil t)
+        (message "Prepared %d Mu4e messages in %s"
+                 (length messages)
+                 bs-mu4e--headers-thread-context-buffer)))))
 
 (defun bs-mu4e--headers-resize-render (buffer)
   "Rerender visible headers BUFFER after a debounced resize."

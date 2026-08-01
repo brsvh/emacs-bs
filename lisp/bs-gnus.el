@@ -70,10 +70,24 @@
 (declare-function gnus-article-read-summary-keys
                   "gnus-art"
                   (&optional arg key not-restore-window))
+(declare-function gnus-article-prepare-display "gnus-art" ())
+(declare-function gnus-agent-fetch-articles
+                  "gnus-agent" (group articles))
+(declare-function gnus-agent-method-p "gnus" (method-or-server))
+(declare-function gnus-agent-request-article
+                  "gnus-agent" (article group))
+(declare-function gnus-sorted-ndifference "gnus-range" (list1 list2))
+(declare-function gnus-summary-update-download-mark
+                  "gnus-sum" (article))
 (declare-function nntp-list-active-group
                   "nntp" (group &optional server))
 
 (defvar gnus-current-article)
+(defvar gnus-agent)
+(defvar gnus-agent-cache)
+(defvar gnus-article-buffer)
+(defvar gnus-article-internal-prepare-hook)
+(defvar gnus-command-method)
 (defvar gnus-dormant-mark)
 (defvar gnus-auto-extend-newsgroup)
 (defvar gnus-newsgroup-cached)
@@ -93,11 +107,13 @@
 (defvar gnus-newsgroup-unseen)
 (defvar gnus-group-list-mode)
 (defvar gnus-summary-line-format)
+(defvar gnus-summary-buffer)
 (defvar gnus-ticked-mark)
 (defvar gnus-topic-alist)
 (defvar gnus-topic-indent-level)
 (defvar gnus-topic-mode)
 (defvar gnus-tmp-thread-tree-header-string)
+(defvar gnus-tmp-internal-hook)
 (defvar gnus-tmp-unread)
 (defvar gnus-unread-mark)
 (defvar nntp-server-buffer)
@@ -268,6 +284,21 @@ A value of zero disables batch insertion without changing
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-summary-display-thread-context nil
+  "Whether to display the generated thread context buffer.
+When nil, keep `*Thread Context*' hidden and select the current
+Summary row.  When non-nil, display that buffer and select all of
+its text."
+  :type 'boolean
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-summary-thread-context-hook nil
+  "Hook run after preparing a Gnus thread context.
+The hook runs in the originating Summary buffer while
+`*Thread Context*' contains the selected subthread."
+  :type 'hook
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-group-count-width 9
   "Minimum total columns reserved for a Group buffer article count."
   :type 'natnum
@@ -292,6 +323,9 @@ from the alist use the label `Usenet'."
 
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
+
+(defconst bs-gnus--summary-thread-context-buffer "*Thread Context*"
+  "Buffer containing the most recently prepared thread context.")
 
 (defconst bs-gnus--summary-prefix-width 10
   "Columns reserved before the thread-tree prefix.")
@@ -1896,6 +1930,147 @@ Return non-nil when the Summary gained at least one article."
       (puthash article t bs-gnus--summary-fold-state)
       (bs-gnus--summary-apply-fold article thread))
     (bs-gnus--summary-restore-selection article)))
+
+(defun bs-gnus--summary-agent-article-available-p (group article)
+  "Return non-nil when ARTICLE from GROUP is stored in the Agent."
+  (with-temp-buffer
+    (let ((gnus-agent-cache t))
+      (gnus-agent-request-article article group))))
+
+(defun bs-gnus--summary-download-articles (group articles)
+  "Ensure that GROUP ARTICLES are stored in the Gnus Agent."
+  (require 'gnus-agent)
+  (unless gnus-agent
+    (user-error "Gnus Agent is not enabled"))
+  (let* ((articles (sort (copy-sequence articles) #'<))
+         (missing
+          (cl-remove-if
+           (lambda (article)
+             (bs-gnus--summary-agent-article-available-p
+              group article))
+           articles))
+         fetch-error)
+    (when missing
+      (let ((method (gnus-find-method-for-group group)))
+        (unless (gnus-agent-method-p method)
+          (user-error "The current Gnus method is not agentized"))
+        (condition-case error-data
+            (let ((gnus-command-method method))
+              (gnus-agent-fetch-articles
+               group (copy-sequence missing)))
+          (error
+           (setq fetch-error (error-message-string error-data))))))
+    (let ((failed
+           (cl-remove-if
+            (lambda (article)
+              (bs-gnus--summary-agent-article-available-p
+               group article))
+            articles)))
+      (when failed
+        (user-error
+         "Failed to download Gnus articles %s%s"
+         (mapconcat #'number-to-string failed ", ")
+         (if fetch-error (format ": %s" fetch-error) ""))))
+    (setq gnus-newsgroup-undownloaded
+          (gnus-sorted-ndifference
+           gnus-newsgroup-undownloaded articles))
+    (save-excursion
+      (dolist (article articles)
+        (when (gnus-summary-goto-subject article nil t)
+          (gnus-summary-update-download-mark article))))))
+
+(defun bs-gnus--summary-render-agent-article
+    (summary-buffer group article)
+  "Render ARTICLE from GROUP using SUMMARY-BUFFER settings."
+  (require 'gnus-art)
+  (with-temp-buffer
+    (let ((gnus-agent-cache t)
+          (gnus-article-buffer (current-buffer))
+          (gnus-summary-buffer summary-buffer)
+          (gnus-tmp-internal-hook
+           gnus-article-internal-prepare-hook))
+      (unless (gnus-agent-request-article article group)
+        (error "Gnus article %d is absent from the Agent" article))
+      (gnus-article-prepare-display)
+      (string-trim-right
+       (buffer-substring-no-properties
+        (point-min) (point-max))))))
+
+(defun bs-gnus--summary-build-thread-context
+    (summary-buffer group articles)
+  "Build a thread context for GROUP ARTICLES from SUMMARY-BUFFER."
+  (let ((texts
+         (mapcar
+          (lambda (article)
+            (bs-gnus--summary-render-agent-article
+             summary-buffer group article))
+          articles))
+        (count (length articles)))
+    (with-current-buffer
+        (get-buffer-create bs-gnus--summary-thread-context-buffer)
+      (fundamental-mode)
+      (erase-buffer)
+      (insert "# Thread Context\n\n"
+              (format "Source: Gnus group `%s`\n\n" group)
+              (format "Articles: %d\n" count))
+      (cl-loop for text in texts
+               for index from 1
+               do (insert (format "\n## Article %d of %d\n\n"
+                                  index count)
+                          text "\n"))
+      (set-buffer-modified-p nil)
+      (current-buffer))))
+
+;;;###autoload
+(defun bs-gnus-summary-mark-subthread ()
+  "Prepare the article at point and its replies as thread context.
+Download every article to the Gnus Agent before replacing
+`*Thread Context*'.  Keep that buffer hidden by default, select
+the current Summary row, and run
+`bs-gnus-summary-thread-context-hook'."
+  (interactive)
+  (unless (derived-mode-p 'gnus-summary-mode)
+    (user-error "This command requires a Gnus Summary buffer"))
+  (let* ((summary-buffer (current-buffer))
+         (article (gnus-summary-article-number))
+         (thread
+          (and article
+               (bs-gnus--summary-thread-for-article article)))
+         (anchor
+          (and thread
+               (cl-find article thread :key #'gnus-data-number)))
+         (subthread
+          (and anchor
+               (cons anchor
+                     (bs-gnus--summary-descendants
+                      article thread))))
+         (articles
+          (mapcar #'gnus-data-number subthread))
+         (group gnus-newsgroup-name))
+    (unless anchor
+      (user-error "No Gnus article thread at point"))
+    (unless (cl-every
+             (lambda (number)
+               (and (integerp number) (> number 0)))
+             articles)
+      (user-error
+       "The subthread contains unavailable sparse articles"))
+    (bs-gnus--summary-download-articles group articles)
+    (let ((context
+           (bs-gnus--summary-build-thread-context
+            summary-buffer group articles)))
+      (gnus-summary-goto-subject article nil t)
+      (run-hooks 'bs-gnus-summary-thread-context-hook)
+      (if bs-gnus-summary-display-thread-context
+          (progn
+            (pop-to-buffer context)
+            (goto-char (point-min))
+            (push-mark (point-max) nil t))
+        (goto-char (line-beginning-position))
+        (push-mark (line-end-position) nil t)
+        (message "Prepared %d Gnus articles in %s"
+                 (length articles)
+                 bs-gnus--summary-thread-context-buffer)))))
 
 (defun bs-gnus--summary-buffers ()
   "Return live Gnus Summary buffers."
