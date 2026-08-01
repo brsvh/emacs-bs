@@ -154,6 +154,16 @@
   "Face for message timestamps."
   :group 'bs-mu4e)
 
+(defface bs-mu4e-headers-fold-indicator-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for folded-reply indicators."
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-fold-indicator ?▸
+  "Character displayed at the left edge of a message with folded replies."
+  :type 'character
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-headers-thread-count-digits 4
   "Minimum decimal digits reserved for thread message counts."
   :type 'natnum
@@ -702,6 +712,9 @@ delegates all other fields to FUNCTION."
 (defconst bs-mu4e--headers-minimum-version "1.14.2"
   "Minimum mu4e version supported by the custom headers renderer.")
 
+(defconst bs-mu4e--headers-root-prefix "*  "
+  "Prefix displayed for the root message of a thread.")
+
 (defconst bs-mu4e--headers-handler-specs
   '((mu4e-headers-append-func . bs-mu4e--headers-append-handler)
     (mu4e-found-func . bs-mu4e--headers-found-handler)
@@ -756,7 +769,7 @@ delegates all other fields to FUNCTION."
   "Thread currently receiving streamed messages.")
 
 (defvar-local bs-mu4e--headers-fold-state nil
-  "Hash table mapping folded thread keys to anchor docids.")
+  "Hash table mapping folded anchor docids to non-nil values.")
 
 (defvar-local bs-mu4e--headers-initialized nil
   "Non-nil when the current headers buffer uses the custom model.")
@@ -941,15 +954,29 @@ incomplete."
             into width
             finally return (or width 0))))
 
-(defun bs-mu4e--headers-title-line (thread width count-width)
+(defun bs-mu4e--headers-thread-count-padding-width ()
+  "Return the display width of one thread-count padding edge."
+  (max 0.0
+       (min 0.5 bs-mu4e-headers-thread-count-padding)))
+
+(defun bs-mu4e--headers-thread-content-column (count-width)
+  "Return the shared thread-content column for COUNT-WIDTH."
+  (ceiling
+   (max (+ (string-width mu4e--mark-fringe)
+           (bs-mu4e--headers-field-width :flags 0))
+        (+ count-width
+           (* 2 (bs-mu4e--headers-thread-count-padding-width))
+           1))))
+
+(defun bs-mu4e--headers-title-line
+    (thread width count-width content-column)
   "Return the title line for THREAD fitted to WIDTH.
 
-Right-align its message-count label to COUNT-WIDTH columns."
+Right-align its message-count label to COUNT-WIDTH columns and align
+its subject to CONTENT-COLUMN."
   (let* ((messages (plist-get thread :messages))
          (root (car messages))
-         (padding-width
-          (max 0.0
-               (min 0.5 bs-mu4e-headers-thread-count-padding)))
+         (padding-width (bs-mu4e--headers-thread-count-padding-width))
          (count-face
           (if (> (bs-mu4e--headers-thread-unread-count thread) 0)
               'bs-mu4e-headers-unread-thread-count-face
@@ -957,7 +984,9 @@ Right-align its message-count label to COUNT-WIDTH columns."
          (count-padding
           (bs-mu4e--headers-space
            padding-width count-face))
-         (count-gap (bs-mu4e--headers-space 1))
+         (count-gap
+          (propertize
+           " " 'display `(space :align-to ,content-column)))
          (count-label
           (propertize
            (bs-mu4e--headers-thread-count-label thread)
@@ -976,22 +1005,18 @@ Right-align its message-count label to COUNT-WIDTH columns."
            (floor width 3)
            (max
             0
-            (floor
-             (- width count-width (* 2 padding-width) 2)))))
+            (floor (- width content-column 1)))))
          (tags (bs-mu4e--headers-tag-string
                 (mu4e-message-field root :tags)
                 tag-limit))
-         (reserved (+ count-width (* 2 padding-width)
+         (reserved (+ content-column
                       (if (string-empty-p tags)
-                          1
-                        (+ 2 (string-width tags)))))
+                          0
+                        (1+ (string-width tags)))))
          (subject (bs-mu4e--headers-truncate
                    subject (max 0 (floor (- width reserved)))))
          (left (concat count count-gap subject))
-         (left-width (+ count-width
-                        (* 2 padding-width)
-                        1
-                        (string-width subject)))
+         (left-width (+ content-column (string-width subject)))
          (tag-padding
           (if (string-empty-p tags)
               ""
@@ -1004,32 +1029,40 @@ Right-align its message-count label to COUNT-WIDTH columns."
        'bs-mu4e-headers-title-face line)
       line)))
 
-(defun bs-mu4e--headers-message-line (msg prefix width)
-  "Return a rendered message line for MSG with PREFIX at WIDTH."
+(defun bs-mu4e--headers-message-line
+    (msg prefix width content-column)
+  "Return a rendered message line for MSG with PREFIX at WIDTH.
+
+Align PREFIX to CONTENT-COLUMN without changing the flags field."
   (let* ((flags (mu4e~headers-field-value msg :flags))
          (flags-width (bs-mu4e--headers-field-width
                        :flags (string-width flags)))
          (flags (bs-mu4e--headers-fit flags flags-width))
+         (prefix-padding
+          (bs-mu4e--headers-space
+           (max 0
+                (- content-column
+                   (string-width mu4e--mark-fringe)
+                   flags-width))))
          (date (concat (mu4e~headers-field-value msg :human-date) " "))
          (correspondent (bs-mu4e--headers-correspondent msg))
          (correspondent-width
           (max 0
                (- width
-                  (string-width mu4e--mark-fringe)
-                  flags-width
+                  content-column
                   (string-width prefix)
                   (string-width date)
-                  2)))
+                  1)))
          (correspondent (bs-mu4e--headers-truncate
                          correspondent correspondent-width))
          (correspondent-start
           (+ (length mu4e--mark-fringe)
              (length flags)
-             (length prefix)
-             1))
+             (length prefix-padding)
+             (length prefix)))
          (left (concat mu4e--mark-fringe
                        flags
-                       " "
+                       prefix-padding
                        prefix
                        correspondent))
          (padding (max 1
@@ -1062,12 +1095,6 @@ Right-align its message-count label to COUNT-WIDTH columns."
      (concat (mu4e~headers-docid-cookie docid) visible "\n")
      'docid docid
      'msg msg)))
-
-(defun bs-mu4e--headers-fold-info (count)
-  "Return a summary line for COUNT folded messages."
-  (propertize
-   (format "-- %d hidden --\n" count)
-   'font-lock-face 'mu4e-related-face))
 
 (defun bs-mu4e--headers-window ()
   "Return a window suitable for sizing the headers buffer."
@@ -1113,47 +1140,92 @@ Right-align its message-count label to COUNT-WIDTH columns."
     (set-marker-insertion-type bs-mu4e--headers-summary-end nil))
   (set-marker bs-mu4e--headers-summary-end (point) (current-buffer)))
 
-(defun bs-mu4e--headers-fold-anchor (thread)
-  "Return the visible anchor docid when THREAD is folded."
-  (let* ((key (plist-get thread :key))
-         (anchor (and (hash-table-p bs-mu4e--headers-fold-state)
-                      (gethash key bs-mu4e--headers-fold-state)))
-         (messages (plist-get thread :messages)))
-    (when (and anchor
-               (not (cl-find anchor messages
-                             :key (lambda (msg)
-                                    (mu4e-message-field msg :docid)))))
-      (setq anchor (mu4e-message-field (car messages) :docid))
-      (puthash key anchor bs-mu4e--headers-fold-state))
-    anchor))
+(defun bs-mu4e--headers-message-level (msg)
+  "Return the thread nesting level of MSG."
+  (let ((level (plist-get (mu4e-message-field msg :meta) :level)))
+    (if (natnump level) level 0)))
 
-(defun bs-mu4e--headers-message-visible-p (msg anchor)
-  "Return non-nil when MSG should remain visible for folded ANCHOR."
+(defun bs-mu4e--headers-descendants (msg thread)
+  "Return descendants of MSG within THREAD."
+  (when-let* ((tail (memq msg (plist-get thread :messages))))
+    (let ((level (bs-mu4e--headers-message-level (car tail))))
+      (cl-loop for child in (cdr tail)
+               while (> (bs-mu4e--headers-message-level child) level)
+               collect child))))
+
+(defun bs-mu4e--headers-important-message-p (msg)
+  "Return non-nil when MSG should remain visible while folded."
   (let ((docid (mu4e-message-field msg :docid)))
-    (or (null anchor)
-        (eq docid anchor)
-        (bs-mu4e--headers-unread-p msg)
+    (or (bs-mu4e--headers-unread-p msg)
         (mu4e-mark-docid-marked-p docid))))
+
+(defun bs-mu4e--headers-folded-message-p (msg)
+  "Return non-nil when MSG has folded replies."
+  (and (hash-table-p bs-mu4e--headers-fold-state)
+       (gethash (mu4e-message-field msg :docid)
+                bs-mu4e--headers-fold-state)))
+
+(defun bs-mu4e--headers-folded-descendant-docids (thread)
+  "Return docids hidden by saved folds in THREAD."
+  (let ((hidden (make-hash-table :test #'eql)))
+    (dolist (msg (plist-get thread :messages))
+      (when (bs-mu4e--headers-folded-message-p msg)
+        (dolist (child (bs-mu4e--headers-descendants msg thread))
+          (unless (bs-mu4e--headers-important-message-p child)
+            (puthash (mu4e-message-field child :docid) t hidden)))))
+    hidden))
+
+(defun bs-mu4e--headers-add-fold-indicator (position docid)
+  "Display a fold indicator at message POSITION for DOCID."
+  (save-excursion
+    (goto-char position)
+    (when-let* ((visible-position
+                 (next-single-property-change
+                  position 'invisible nil (line-end-position))))
+      (when (eq (char-after visible-position) ?\s)
+        (let ((overlay
+               (make-overlay visible-position
+                             (1+ visible-position) nil t nil)))
+          (overlay-put
+           overlay 'display
+           (propertize
+            (char-to-string bs-mu4e-headers-fold-indicator)
+            'face 'bs-mu4e-headers-fold-indicator-face))
+          (overlay-put overlay 'evaporate t)
+          (overlay-put overlay 'bs-mu4e-fold-overlay t)
+          (overlay-put overlay 'bs-mu4e-fold-indicator t)
+          (overlay-put overlay 'bs-mu4e-fold-anchor docid))))))
 
 (defun bs-mu4e--headers-insert-thread (thread width count-width)
   "Insert THREAD at point for WIDTH and update its region markers.
 
 Right-align its message-count label to COUNT-WIDTH columns."
-  (let ((start (point))
-        (anchor (bs-mu4e--headers-fold-anchor thread))
-        (hidden 0)
-        (mu4e~headers-thread-state nil))
-    (insert (bs-mu4e--headers-title-line thread width count-width) "\n")
-    (dolist (msg (plist-get thread :messages))
-      (let ((prefix (if mu4e-search-threads
-                        (mu4e~headers-thread-prefix
-                         (mu4e-message-field msg :meta))
-                      "")))
-        (if (bs-mu4e--headers-message-visible-p msg anchor)
-            (insert (bs-mu4e--headers-message-line msg prefix width))
-          (cl-incf hidden))))
-    (when (> hidden 0)
-      (insert (bs-mu4e--headers-fold-info hidden)))
+  (let* ((messages (plist-get thread :messages))
+         (root (car messages))
+         (start (point))
+         (hidden (bs-mu4e--headers-folded-descendant-docids thread))
+         (content-column
+          (bs-mu4e--headers-thread-content-column count-width))
+         (mu4e~headers-thread-state nil))
+    (insert (bs-mu4e--headers-title-line
+             thread width count-width content-column)
+            "\n")
+    (dolist (msg messages)
+      (let* ((native-prefix
+              (if mu4e-search-threads
+                  (mu4e~headers-thread-prefix
+                   (mu4e-message-field msg :meta))
+                ""))
+             (prefix (if (and mu4e-search-threads (eq msg root))
+                         bs-mu4e--headers-root-prefix
+                       native-prefix))
+             (docid (mu4e-message-field msg :docid)))
+        (unless (gethash docid hidden)
+          (let ((position (point)))
+            (insert (bs-mu4e--headers-message-line
+                     msg prefix width content-column))
+            (when (bs-mu4e--headers-folded-message-p msg)
+              (bs-mu4e--headers-add-fold-indicator position docid))))))
     (insert "\n")
     (unless (markerp (plist-get thread :start))
       (plist-put thread :start (make-marker)))
@@ -1574,21 +1646,26 @@ Search backwards when BACKWARDS is non-nil."
 
 ;;;###autoload
 (defun bs-mu4e-headers-fold-toggle ()
-  "Toggle folding for the thread containing the message at point."
+  "Toggle folding of replies to the message at point."
   (interactive)
   (unless bs-mu4e--headers-initialized
     (user-error "The custom Mu4e headers renderer is not active"))
   (let* ((msg (mu4e-message-at-point 'noerror))
          (docid (and msg (mu4e-message-field msg :docid)))
          (found (and docid (bs-mu4e--headers-find-message docid)))
-         (thread (car-safe found)))
+         (thread (car-safe found))
+         (anchor (cdr-safe found))
+         (descendants (and thread
+                           anchor
+                           (bs-mu4e--headers-descendants anchor thread))))
     (unless thread
       (user-error "No message thread at point"))
-    (let ((key (plist-get thread :key)))
-      (if (gethash key bs-mu4e--headers-fold-state)
-          (remhash key bs-mu4e--headers-fold-state)
-        (puthash key docid bs-mu4e--headers-fold-state))
-      (bs-mu4e--headers-rerender-thread thread docid))))
+    (unless descendants
+      (user-error "The current message has no replies"))
+    (if (gethash docid bs-mu4e--headers-fold-state)
+        (remhash docid bs-mu4e--headers-fold-state)
+      (puthash docid t bs-mu4e--headers-fold-state))
+    (bs-mu4e--headers-rerender-thread thread docid)))
 
 (defun bs-mu4e--headers-resize-render (buffer)
   "Rerender visible headers BUFFER after a debounced resize."
