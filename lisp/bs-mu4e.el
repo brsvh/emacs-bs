@@ -1762,6 +1762,7 @@ and run `bs-mu4e-headers-thread-context-hook'."
             (goto-char (point-min))
             (push-mark (point-max) nil t))
         (mu4e~headers-goto-docid docid t)
+        (move-to-column 2)
         (push-mark (line-end-position) nil t)
         (message "Prepared %d Mu4e messages in %s"
                  (length messages)
