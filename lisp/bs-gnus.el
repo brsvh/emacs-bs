@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'bs-lib)
 (require 'gnus)
 (require 'mail-parse)
 (require 'subr-x)
@@ -1992,9 +1993,10 @@ Return non-nil when the Summary gained at least one article."
       (unless (gnus-agent-request-article article group)
         (error "Gnus article %d is absent from the Agent" article))
       (gnus-article-prepare-display)
-      (string-trim-right
-       (buffer-substring-no-properties
-        (point-min) (point-max))))))
+      (bs--decode-raw-utf-8
+       (string-trim-right
+        (buffer-substring-no-properties
+         (point-min) (point-max)))))))
 
 (defun bs-gnus--summary-build-thread-context
     (summary-buffer group articles)

@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'bs-lib)
 (require 'mail-parse)
 (require 'subr-x)
 
@@ -1701,9 +1702,10 @@ Search backwards when BACKWARDS is non-nil."
           (gnus-unbuttonized-mime-types '(".*/.*"))
           (mu4e-view-fields '(:from :to :cc :subject :date)))
       (mu4e--view-render-buffer msg)
-      (string-trim-right
-       (buffer-substring-no-properties
-        (point-min) (point-max))))))
+      (bs--decode-raw-utf-8
+       (string-trim-right
+        (buffer-substring-no-properties
+         (point-min) (point-max)))))))
 
 (defun bs-mu4e--headers-build-thread-context (messages query)
   "Build a thread context for MESSAGES from Mu4e QUERY."

@@ -30,6 +30,19 @@
 
 (require 'cl-lib)
 
+(defun bs--decode-raw-utf-8 (string)
+  "Decode raw UTF-8 byte sequences in STRING.
+Map bytes that do not form valid UTF-8 sequences to their Latin-1
+characters so the result contains only Unicode scalar values."
+  (mapconcat
+   (lambda (character)
+     (string
+      (if (eq (char-charset character) 'eight-bit)
+          (logand character #xff)
+        character)))
+   (decode-coding-string string 'utf-8)
+   ""))
+
 ;;;###autoload
 (defun bs-path (&rest segments)
   "Join SEGMENTS to a path."
