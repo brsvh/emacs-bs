@@ -297,18 +297,24 @@ A value of zero disables batch insertion without changing
   :type 'boolean
   :group 'bs-gnus)
 
+(defcustom bs-gnus-context-buffer-name "*Gnus Thread Context*"
+  "Name of the buffer containing the latest Gnus context."
+  :type 'string
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-summary-display-thread-context nil
   "Whether to display the generated thread context buffer.
-When nil, keep `*Thread Context*' hidden and select the current
-Summary row.  When non-nil, display that buffer and select all of
-its text."
+When nil, keep the buffer named by `bs-gnus-context-buffer-name'
+hidden and select the current Summary row.  When non-nil, display
+that buffer and select all of its text."
   :type 'boolean
   :group 'bs-gnus)
 
 (defcustom bs-gnus-summary-thread-context-hook nil
   "Hook run after preparing a Gnus thread context.
-The hook runs in the originating Summary buffer while
-`*Thread Context*' contains the selected subthread."
+The hook runs in the originating Summary buffer while the buffer
+named by `bs-gnus-context-buffer-name' contains the selected
+subthread."
   :type 'hook
   :group 'bs-gnus)
 
@@ -336,9 +342,6 @@ from the alist use the label `Usenet'."
 
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
-
-(defconst bs-gnus--summary-thread-context-buffer "*Thread Context*"
-  "Buffer containing the most recently prepared thread context.")
 
 (defconst bs-gnus--summary-prefix-width 10
   "Columns reserved before the thread-tree prefix.")
@@ -2050,7 +2053,7 @@ Return non-nil when the Summary gained at least one article."
           articles))
         (count (length articles)))
     (with-current-buffer
-        (get-buffer-create bs-gnus--summary-thread-context-buffer)
+        (get-buffer-create bs-gnus-context-buffer-name)
       (fundamental-mode)
       (erase-buffer)
       (insert "# Thread Context\n\n"
@@ -2068,8 +2071,8 @@ Return non-nil when the Summary gained at least one article."
 (defun bs-gnus-summary-mark-subthread ()
   "Prepare the article at point and its replies as thread context.
 Download every article to the Gnus Agent before replacing
-`*Thread Context*'.  Keep that buffer hidden by default, select
-the current Summary row, and run
+the buffer named by `bs-gnus-context-buffer-name'.  Keep that
+buffer hidden by default, select the current Summary row, and run
 `bs-gnus-summary-thread-context-hook'."
   (interactive)
   (unless (derived-mode-p 'gnus-summary-mode)
@@ -2113,7 +2116,7 @@ the current Summary row, and run
         (push-mark (line-end-position) nil t)
         (message "Prepared %d Gnus articles in %s"
                  (length articles)
-                 bs-gnus--summary-thread-context-buffer)))))
+                 bs-gnus-context-buffer-name)))))
 
 (defun bs-gnus--summary-buffers ()
   "Return live Gnus Summary buffers."

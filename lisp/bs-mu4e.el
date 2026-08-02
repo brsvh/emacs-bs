@@ -181,18 +181,24 @@
   :type 'number
   :group 'bs-mu4e)
 
+(defcustom bs-mu4e-context-buffer-name "*Mu4e Thread Context*"
+  "Name of the buffer containing the latest Mu4e context."
+  :type 'string
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-headers-display-thread-context nil
   "Whether to display the generated thread context buffer.
-When nil, keep `*Thread Context*' hidden and select the current
-Headers row.  When non-nil, display that buffer and select all of
-its text."
+When nil, keep the buffer named by `bs-mu4e-context-buffer-name'
+hidden and select the current Headers row.  When non-nil, display
+that buffer and select all of its text."
   :type 'boolean
   :group 'bs-mu4e)
 
 (defcustom bs-mu4e-headers-thread-context-hook nil
   "Hook run after preparing a Mu4e thread context.
-The hook runs in the originating Headers buffer while
-`*Thread Context*' contains the selected subthread."
+The hook runs in the originating Headers buffer while the buffer
+named by `bs-mu4e-context-buffer-name' contains the selected
+subthread."
   :type 'hook
   :group 'bs-mu4e)
 
@@ -777,9 +783,6 @@ delegates all other fields to FUNCTION."
     (,(kbd "TAB") . bs-mu4e-headers-fold-toggle)
     (,(kbd "<tab>") . bs-mu4e-headers-fold-toggle))
   "Bindings installed in `mu4e-headers-mode-map'.")
-
-(defconst bs-mu4e--headers-thread-context-buffer "*Thread Context*"
-  "Buffer containing the most recently prepared thread context.")
 
 (defvar bs-mu4e--headers-enabled nil
   "Non-nil when the custom headers renderer is installed.")
@@ -1712,7 +1715,7 @@ Search backwards when BACKWARDS is non-nil."
   (let ((texts (mapcar #'bs-mu4e--headers-render-message messages))
         (count (length messages)))
     (with-current-buffer
-        (get-buffer-create bs-mu4e--headers-thread-context-buffer)
+        (get-buffer-create bs-mu4e-context-buffer-name)
       (fundamental-mode)
       (erase-buffer)
       (insert "# Thread Context\n\n"
@@ -1729,9 +1732,10 @@ Search backwards when BACKWARDS is non-nil."
 ;;;###autoload
 (defun bs-mu4e-headers-mark-subthread ()
   "Prepare the message at point and its replies as thread context.
-Render every message before replacing `*Thread Context*'.  Keep
-that buffer hidden by default, select the current Headers row,
-and run `bs-mu4e-headers-thread-context-hook'."
+Render every message before replacing the buffer named by
+`bs-mu4e-context-buffer-name'.  Keep that buffer hidden by
+default, select the current Headers row, and run
+`bs-mu4e-headers-thread-context-hook'."
   (interactive)
   (unless (and (derived-mode-p 'mu4e-headers-mode)
                bs-mu4e--headers-initialized)
@@ -1766,7 +1770,7 @@ and run `bs-mu4e-headers-thread-context-hook'."
         (push-mark (line-end-position) nil t)
         (message "Prepared %d Mu4e messages in %s"
                  (length messages)
-                 bs-mu4e--headers-thread-context-buffer)))))
+                 bs-mu4e-context-buffer-name)))))
 
 (defun bs-mu4e--headers-resize-render (buffer)
   "Rerender visible headers BUFFER after a debounced resize."
