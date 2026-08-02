@@ -47,6 +47,9 @@
 (declare-function gnus-data-pos "gnus-sum" (data))
 (declare-function gnus-highlight-selected-summary "gnus-sum" ())
 (declare-function gnus-summary-article-number "gnus-sum" ())
+(declare-function gnus-summary-select-article
+                  "gnus-sum"
+                  (&optional all-headers force pseudo article))
 (declare-function gnus-summary-goto-subject
                   "gnus-sum" (article &optional force silent))
 (declare-function gnus-summary-insert-old-articles
@@ -72,6 +75,8 @@
                   "gnus-art"
                   (&optional arg key not-restore-window))
 (declare-function gnus-article-prepare-display "gnus-art" ())
+(declare-function hl-line-highlight "hl-line" ())
+(declare-function hl-line-move "hl-line" (overlay))
 (declare-function gnus-agent-fetch-articles
                   "gnus-agent" (group articles))
 (declare-function gnus-agent-method-p "gnus" (method-or-server))
@@ -117,6 +122,8 @@
 (defvar gnus-tmp-internal-hook)
 (defvar gnus-tmp-unread)
 (defvar gnus-unread-mark)
+(defvar hl-line-mode)
+(defvar hl-line-overlay)
 (defvar nntp-server-buffer)
 
 (defgroup bs-gnus nil
@@ -1527,6 +1534,16 @@ Right-align its article count to COUNT-WIDTH columns."
           (overlay-put overlay 'evaporate t)
           (overlay-put overlay 'bs-gnus-context-overlay t))))))
 
+(defun bs-gnus--summary-refresh-hl-line ()
+  "Move the current Summary buffer's Hl-Line overlay to point."
+  (when (bound-and-true-p hl-line-mode)
+    (if (overlayp hl-line-overlay)
+        (hl-line-move hl-line-overlay)
+      (when-let* ((window
+                   (get-buffer-window (current-buffer) t)))
+        (with-selected-window window
+          (hl-line-highlight))))))
+
 (defun bs-gnus--summary-restore-selection (article)
   "Restore point to ARTICLE when it remains available."
   (when (and article
@@ -1539,7 +1556,8 @@ Right-align its article count to COUNT-WIDTH columns."
     (save-excursion
       (when (gnus-summary-goto-subject
              gnus-current-article nil t)
-        (gnus-highlight-selected-summary)))))
+        (gnus-highlight-selected-summary))))
+  (bs-gnus--summary-refresh-hl-line))
 
 (defun bs-gnus--summary-selection-article ()
   "Return the Summary article whose point should survive a render."
@@ -1846,6 +1864,13 @@ Return the article number, or nil at the buffer boundary."
              (bs-gnus--summary-extend-old-articles))
       (bs-gnus--summary-extend-new-articles))))
 
+(defun bs-gnus--summary-follow-point ()
+  "Display the article at point when its Article buffer is visible."
+  (when (and (not bs-gnus--summary-navigation-from-article)
+             gnus-article-buffer
+             (get-buffer-window gnus-article-buffer t))
+    (gnus-summary-select-article)))
+
 (defun bs-gnus--summary-move-visible-articles (count direction)
   "Move COUNT visible articles in DIRECTION.
 Return the number of requested steps that could not be completed."
@@ -1870,7 +1895,9 @@ Return the number of requested steps that could not be completed."
     (setq moved (- (abs count) remaining))
     (when (> moved 0)
       (gnus-summary-recenter)
-      (bs-gnus--summary-position-point))
+      (bs-gnus--summary-position-point)
+      (bs-gnus--summary-follow-point)
+      (bs-gnus--summary-refresh-hl-line))
     (when (> remaining 0)
       (gnus-message 7 "No more articles"))
     remaining))
