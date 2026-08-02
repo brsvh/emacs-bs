@@ -30,7 +30,8 @@
 
 (require 'bs-lib)
 (require 'simple)
-(require 'tabify)
+
+(declare-function untabify "tabify" (start end &optional arg))
 
 (defgroup bs nil
   "Customize Bingshan Emacs extension."
