@@ -1685,9 +1685,16 @@ Right-align its article count to COUNT-WIDTH columns."
                  (text-property-not-all
                   position (point-max)
                   'bs-gnus-correspondent-face nil))
-      (let* ((face
-              (get-text-property
-               position 'bs-gnus-correspondent-face))
+      (let* ((article
+              (get-text-property position 'gnus-number))
+             (data (and article (gnus-data-find article)))
+             (face
+              (if data
+                  (if (= (gnus-data-mark data) gnus-unread-mark)
+                      'bs-gnus-summary-unread-correspondent-face
+                    'bs-gnus-summary-correspondent-face)
+                (get-text-property
+                 position 'bs-gnus-correspondent-face)))
              (end
               (next-single-property-change
                position 'bs-gnus-correspondent-face
@@ -1708,7 +1715,8 @@ Right-align its article count to COUNT-WIDTH columns."
                          bs-gnus-summary-unread-correspondent-face)))
                faces)))
         (put-text-property
-         position end 'face (cons face faces))
+         position end 'bs-gnus-correspondent-face face)
+        (put-text-property position end 'face (cons face faces))
         (setq position end)))))
 
 (defun bs-gnus-summary-format-message (header)
