@@ -292,6 +292,11 @@ A value of zero disables batch insertion without changing
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-summary-follow-visible-article nil
+  "Whether Summary navigation follows point in a visible Article buffer."
+  :type 'boolean
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-summary-display-thread-context nil
   "Whether to display the generated thread context buffer.
 When nil, keep `*Thread Context*' hidden and select the current
@@ -473,7 +478,7 @@ non-nil."
 
 (defun bs-gnus--group-display-name (group)
   "Return the display name for GROUP."
-  (string-remove-prefix "nntp+gmane:" group))
+  (gnus-group-real-name group))
 
 (defun bs-gnus--group-total (group)
   "Return the estimated number of articles available in GROUP."
@@ -1866,7 +1871,8 @@ Return the article number, or nil at the buffer boundary."
 
 (defun bs-gnus--summary-follow-point ()
   "Display the article at point when its Article buffer is visible."
-  (when (and (not bs-gnus--summary-navigation-from-article)
+  (when (and bs-gnus-summary-follow-visible-article
+             (not bs-gnus--summary-navigation-from-article)
              gnus-article-buffer
              (get-buffer-window gnus-article-buffer t))
     (gnus-summary-select-article)))
