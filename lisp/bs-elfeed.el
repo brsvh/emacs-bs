@@ -720,19 +720,19 @@ COLLAPSED controls whether the disclosure marker is shown."
    (propertize
     (number-to-string feed-count)
     'face 'bs-elfeed-tree-source-face)
-   " feeds"
+   (propertize " feeds" 'face 'bs-elfeed-tree-source-face)
    (propertize " · " 'face 'bs-elfeed-tree-separator-face)
    (propertize
     (number-to-string unread)
     'face (if (> unread 0)
               'bs-elfeed-tree-topic-count-face
             'bs-elfeed-tree-empty-count-face))
-   " unread"
+   (propertize " unread" 'face 'bs-elfeed-tree-source-face)
    (propertize " · " 'face 'bs-elfeed-tree-separator-face)
    (propertize
     (number-to-string (+ unread read))
     'face 'bs-elfeed-tree-total-face)
-   " total"))
+   (propertize " total" 'face 'bs-elfeed-tree-source-face)))
 
 (defun bs-elfeed--next-update-text ()
   "Return the time remaining before the next periodic Elfeed update."
@@ -1204,19 +1204,25 @@ Remove spacing previously installed by this package otherwise."
                   (propertize
                    (number-to-string unread)
                    'face 'bs-elfeed-search-overview-unread-face)
-                  " unread"
+                  (propertize
+                   " unread"
+                   'face 'bs-elfeed-tree-source-face)
                   (propertize " · "
                               'face 'bs-elfeed-tree-separator-face)
                   (propertize
                    (number-to-string shown)
                    'face 'bs-elfeed-search-overview-shown-face)
-                  " shown"
+                  (propertize
+                   " shown"
+                   'face 'bs-elfeed-tree-source-face)
                   (propertize " · "
                               'face 'bs-elfeed-tree-separator-face)
                   (propertize
                    (number-to-string total)
                    'face 'bs-elfeed-search-overview-total-face)
-                  " total"))
+                  (propertize
+                   " total"
+                   'face 'bs-elfeed-tree-source-face)))
                 (label
                  (propertize "SEARCH" 'face 'bs-elfeed-search-overview-face))
                 (width

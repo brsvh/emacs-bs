@@ -2826,13 +2826,21 @@ Right-align its article count to COUNT-WIDTH columns."
               (if (> unread 0)
                   'bs-gnus-summary-group-unread-face
                 'bs-gnus-summary-group-empty-unread-face))
-             " unread · "
+             (propertize
+              " unread · "
+              'face 'bs-gnus-group-source-face)
              (propertize
               (number-to-string loaded)
               'face 'bs-gnus-summary-group-loaded-face)
-             " loaded · "
-             (number-to-string total)
-             " total"))
+             (propertize
+              " loaded · "
+              'face 'bs-gnus-group-source-face)
+             (propertize
+              (number-to-string total)
+              'face 'bs-gnus-group-total-face)
+             (propertize
+              " total"
+              'face 'bs-gnus-group-source-face)))
            (identity
             (concat
              (propertize
