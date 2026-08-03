@@ -1228,6 +1228,15 @@ interpreted as an image file.  Nil requests no application icon."
   :type 'natnum
   :group 'bs-mu4e)
 
+(defcustom bs-mu4e-notifications-read-display-function
+  #'bs-call-in-new-frame
+  "Function used to display Mu4e notification Read actions.
+The function receives the action function followed by its arguments.
+Use `bs-call-in-current-frame' or `bs-call-in-new-frame' for the
+standard behaviors."
+  :type 'function
+  :group 'bs-mu4e)
+
 (defvar bs-mu4e--notifications-avatar-generation 0
   "Generation identifying relevant asynchronous avatar callbacks.")
 
@@ -1520,9 +1529,11 @@ Return FILE on success, or nil when IMAGE has no embedded data."
   "Open the message identified by MESSAGE-ID through a Mu4e search.
 Preserve the current Headers query in Mu4e's search history."
   (require 'mu4e-search)
-  (mu4e-search (concat "msgid:" message-id)
-               nil nil nil message-id t)
-  (select-frame-set-input-focus (selected-frame)))
+  (funcall
+   bs-mu4e-notifications-read-display-function
+   #'mu4e-search
+   (concat "msgid:" message-id)
+   nil nil nil message-id t))
 
 (defun bs-mu4e--notifications-mark-read (message-id)
   "Mark the message identified by MESSAGE-ID as read."

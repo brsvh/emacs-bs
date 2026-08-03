@@ -77,6 +77,30 @@ DEFAULT-VALUE."
       value)))
 
 ;;;###autoload
+(defun bs-call-in-current-frame (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS and focus the selected Emacs frame."
+  (prog1
+      (apply function arguments)
+    (select-frame-set-input-focus (selected-frame))))
+
+;;;###autoload
+(defun bs-call-in-new-frame (function &rest arguments)
+  "Create a frame in this Emacs session and call FUNCTION with ARGUMENTS.
+Select and focus the new frame after FUNCTION returns.  Delete the
+frame when FUNCTION exits nonlocally."
+  (let ((frame (make-frame))
+        completed)
+    (unwind-protect
+        (prog1
+            (with-selected-frame frame
+              (apply function arguments))
+          (select-frame-set-input-focus frame)
+          (setq completed t))
+      (unless completed
+        (when (frame-live-p frame)
+          (delete-frame frame))))))
+
+;;;###autoload
 (defun bs-silence-message (func &rest args)
   "Run FUNC with ARGS, silencing all messages."
   (cl-letf (((symbol-function #'message) #'ignore))

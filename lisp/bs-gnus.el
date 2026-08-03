@@ -530,6 +530,15 @@ After exhausting the list, continue using its final delay."
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-notifications-read-display-function
+  #'bs-call-in-new-frame
+  "Function used to display Gnus notification Read actions.
+The function receives the action function followed by its arguments.
+Use `bs-call-in-current-frame' or `bs-call-in-new-frame' for the
+standard behaviors."
+  :type 'function
+  :group 'bs-gnus)
+
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
 
@@ -1900,6 +1909,16 @@ requested header numbers.  Return the numbers actually available."
           (bs-gnus--notifications-mark-sent
            group article id))))))
 
+(defun bs-gnus--notifications-action-with-display-function
+    (function id key)
+  "Call notification action FUNCTION with ID and KEY.
+Open mapped Read actions using the configured display function."
+  (if (and (member key '("default" "read"))
+           (assoc id gnus-notifications-id-to-msg))
+      (funcall
+       bs-gnus-notifications-read-display-function function id key)
+    (funcall function id key)))
+
 (defun bs-gnus--update-group-identity-at (buffer position)
   "Return the Group or Topic identity at POSITION in BUFFER."
   (with-current-buffer buffer
@@ -2177,13 +2196,22 @@ requested header numbers.  Return the numbers actually available."
   "Deliver configured Gnus notifications from background updates."
   (interactive)
   (require 'gnus-notifications)
+  (unless (advice-member-p
+           #'bs-gnus--notifications-action-with-display-function
+           'gnus-notifications-action)
+    (advice-add
+     'gnus-notifications-action :around
+     #'bs-gnus--notifications-action-with-display-function))
   (setq bs-gnus--notifications-enabled t))
 
 ;;;###autoload
 (defun bs-gnus-notifications-disable ()
   "Disable notifications without clearing this session's sent state."
   (interactive)
-  (setq bs-gnus--notifications-enabled nil))
+  (setq bs-gnus--notifications-enabled nil)
+  (advice-remove
+   'gnus-notifications-action
+   #'bs-gnus--notifications-action-with-display-function))
 
 ;;;###autoload
 (defun bs-gnus-update-enable ()

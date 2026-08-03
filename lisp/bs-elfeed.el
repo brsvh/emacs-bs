@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'bs-lib)
 (require 'dom)
 (require 'elfeed)
 (require 'elfeed-search)
@@ -45,7 +46,7 @@
 (defvar elfeed-search-entries)
 (defvar elfeed-search-header-function)
 (defvar elfeed-search-print-entry-function)
-(defvar elfeed-show-entry)
+(defvar elfeed-show-entry-switch)
 (defvar elfeed-tree--last-update)
 (defvar elfeed-tree-filter)
 (defvar elfeed-tree-header-function)
@@ -276,6 +277,15 @@ interpreted as an image file.  Nil requests no application icon."
 (defcustom bs-elfeed-notifications-favicon-fetch-timeout 15
   "Seconds to wait for each Elfeed notification favicon request."
   :type 'number
+  :group 'bs-elfeed)
+
+(defcustom bs-elfeed-notifications-read-display-function
+  #'bs-call-in-new-frame
+  "Function used to display Elfeed notification Read actions.
+The function receives the action function followed by its arguments.
+Use `bs-call-in-current-frame' or `bs-call-in-new-frame' for the
+standard behaviors."
+  :type 'function
   :group 'bs-elfeed)
 
 (defcustom bs-elfeed-tree-tag-names
@@ -772,28 +782,19 @@ asynchronously when their feed content is too short."
     (elfeed-search-update :force)
     entry))
 
-(defun bs-elfeed--notifications-show-buffer (entry-id)
-  "Return an Elfeed Show buffer displaying ENTRY-ID."
-  (cl-find-if
-   (lambda (buffer)
-     (with-current-buffer buffer
-       (and (derived-mode-p 'elfeed-show-mode)
-            elfeed-show-entry
-            (equal entry-id
-                   (elfeed-entry-id elfeed-show-entry)))))
-   (buffer-list)))
+(defun bs-elfeed--notifications-show-entry (entry)
+  "Display Elfeed ENTRY in the current frame's selected window."
+  (let ((elfeed-show-entry-switch #'switch-to-buffer))
+    (elfeed-show-entry entry)))
 
 (defun bs-elfeed--notifications-read (entry-id)
-  "Open and focus the Elfeed entry identified by ENTRY-ID."
+  "Open ENTRY-ID using the configured Elfeed display function."
   (when-let* ((entry
                (bs-elfeed--notifications-mark-read entry-id)))
     (require 'elfeed-show)
-    (elfeed-show-entry entry)
-    (when-let* ((buffer
-                 (bs-elfeed--notifications-show-buffer entry-id))
-                (window (get-buffer-window buffer t)))
-      (select-window window)
-      (select-frame-set-input-focus (window-frame window)))))
+    (funcall
+     bs-elfeed-notifications-read-display-function
+     #'bs-elfeed--notifications-show-entry entry)))
 
 (defun bs-elfeed--notifications-action (id key)
   "Apply action KEY to the Elfeed entry associated with notification ID."
