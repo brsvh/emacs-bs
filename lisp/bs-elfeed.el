@@ -49,9 +49,12 @@
 (defvar elfeed-tree-update-hook)
 
 (declare-function elfeed--header-button "elfeed")
-(declare-function elfeed--header-jobs "elfeed-search")
+(declare-function elfeed--header-log-button "elfeed")
+(declare-function elfeed--header-jobs "elfeed")
 (declare-function elfeed-db-last-update "elfeed-db")
 (declare-function elfeed-db-size "elfeed-db")
+(declare-function elfeed-queue-count-active "elfeed")
+(declare-function elfeed-queue-count-total "elfeed")
 (declare-function elfeed-score-scoring-get-score-from-entry
                   "elfeed-score-scoring")
 (declare-function elfeed-tree--build-nested "elfeed-tree")
@@ -104,8 +107,13 @@ entries."
   "Face used for labels in Elfeed header lines."
   :group 'bs-elfeed)
 
+(defface bs-elfeed-header-value-face
+  '((t :inherit font-lock-keyword-face :slant italic))
+  "Face used for dynamic values in Elfeed header lines."
+  :group 'bs-elfeed)
+
 (defface bs-elfeed-tree-next-update-face
-  '((t :inherit font-lock-keyword-face))
+  '((t :inherit bs-elfeed-header-value-face))
   "Face used for the next-update time in the Elfeed Tree header."
   :group 'bs-elfeed)
 
@@ -708,18 +716,21 @@ COLLAPSED controls whether the disclosure marker is shown."
   "Format statistics for FEED-COUNT feeds with UNREAD and READ entries."
   (concat
    (propertize
-    (format "%d feeds" feed-count)
+    (number-to-string feed-count)
     'face 'bs-elfeed-tree-source-face)
+   " feeds"
    (propertize " · " 'face 'bs-elfeed-tree-separator-face)
    (propertize
-    (format "%d unread" unread)
+    (number-to-string unread)
     'face (if (> unread 0)
               'bs-elfeed-tree-topic-count-face
             'bs-elfeed-tree-empty-count-face))
+   " unread"
    (propertize " · " 'face 'bs-elfeed-tree-separator-face)
    (propertize
-    (format "%d total" (+ unread read))
-    'face 'bs-elfeed-tree-total-face)))
+    (number-to-string (+ unread read))
+    'face 'bs-elfeed-tree-total-face)
+   " total"))
 
 (defun bs-elfeed--next-update-text ()
   "Return the time remaining before the next periodic Elfeed update."
@@ -741,10 +752,25 @@ COLLAPSED controls whether the disclosure marker is shown."
     (propertize (bs-elfeed--next-update-text)
                 'face 'bs-elfeed-tree-next-update-face))))
 
+(defun bs-elfeed--header-jobs ()
+  "Return an Elfeed job status using the shared header semantics."
+  (let ((total (elfeed-queue-count-total)))
+    (if (zerop total)
+        (elfeed--header-jobs)
+      (let ((active (elfeed-queue-count-active)))
+        (concat
+         (elfeed--header-log-button)
+         (propertize "DOWNLOADING"
+                     'face 'bs-elfeed-header-label-face)
+         " "
+         (propertize
+          (format "%d/%d" active total)
+          'face 'bs-elfeed-header-value-face))))))
+
 (defun bs-elfeed--tree-header ()
   "Return the native Tree status with right-aligned feed statistics."
   (let* ((status
-          (or (elfeed--header-jobs)
+          (or (bs-elfeed--header-jobs)
               (bs-elfeed--tree-next-update-status)))
          (header
           (if (not bs-elfeed-tree--statistics)
@@ -1151,7 +1177,7 @@ When FORCE is nil, redraw only after the database changes."
   (let
       ((header
         (or
-         (elfeed--header-jobs)
+         (bs-elfeed--header-jobs)
          (let* ((shown (length elfeed-search-entries))
                 (unread
                  (cl-count-if
@@ -1162,18 +1188,21 @@ When FORCE is nil, redraw only after the database changes."
                 (statistics
                  (concat
                   (propertize
-                   (format "%d unread" unread)
+                   (number-to-string unread)
                    'face 'bs-elfeed-search-overview-unread-face)
+                  " unread"
                   (propertize " · "
                               'face 'bs-elfeed-tree-separator-face)
                   (propertize
-                   (format "%d shown" shown)
+                   (number-to-string shown)
                    'face 'bs-elfeed-search-overview-shown-face)
+                  " shown"
                   (propertize " · "
                               'face 'bs-elfeed-tree-separator-face)
                   (propertize
-                   (format "%d total" total)
-                   'face 'bs-elfeed-search-overview-total-face)))
+                   (number-to-string total)
+                   'face 'bs-elfeed-search-overview-total-face)
+                  " total"))
                 (label
                  (propertize "SEARCH" 'face 'bs-elfeed-search-overview-face))
                 (width
