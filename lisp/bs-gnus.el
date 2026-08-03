@@ -131,7 +131,32 @@
 (defvar gnus-article-buffer)
 (defvar gnus-article-internal-prepare-hook)
 (defvar gnus-command-method)
+(defvar gnus-ancient-mark)
+(defvar gnus-cached-mark)
+(defvar gnus-canceled-mark)
+(defvar gnus-catchup-mark)
+(defvar gnus-del-mark)
+(defvar gnus-downloadable-mark)
+(defvar gnus-downloaded-mark)
 (defvar gnus-dormant-mark)
+(defvar gnus-duplicate-mark)
+(defvar gnus-expirable-mark)
+(defvar gnus-forwarded-mark)
+(defvar gnus-kill-file-mark)
+(defvar gnus-killed-mark)
+(defvar gnus-low-score-mark)
+(defvar gnus-no-mark)
+(defvar gnus-process-mark)
+(defvar gnus-read-mark)
+(defvar gnus-replied-mark)
+(defvar gnus-saved-mark)
+(defvar gnus-score-below-mark)
+(defvar gnus-score-over-mark)
+(defvar gnus-spam-mark)
+(defvar gnus-sparse-mark)
+(defvar gnus-undownloaded-mark)
+(defvar gnus-unseen-mark)
+(defvar gnus-unsendable-mark)
 (defvar gnus-auto-extend-newsgroup)
 (defvar gnus-newsgroup-cached)
 (defvar gnus-newsgroup-ancient)
@@ -162,6 +187,7 @@
 (defvar gnus-secondary-select-methods)
 (defvar gnus-startup-file)
 (defvar gnus-summary-line-format)
+(defvar gnus-summary-mark-positions)
 (defvar gnus-summary-buffer)
 (defvar gnus-ticked-mark)
 (defvar gnus-topic-alist)
@@ -198,6 +224,36 @@
 (defface bs-gnus-summary-unread-correspondent-face
   '((t :inherit default :weight bold :slant italic))
   "Face for correspondents of unread articles."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-unread-mark-face
+  '((t :inherit error :weight bold))
+  "Face for unread article marks in Summary buffers."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-attention-mark-face
+  '((t :inherit warning :weight bold))
+  "Face for article marks requiring attention."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-activity-mark-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for reply, forwarding, and new-article marks."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-stored-mark-face
+  '((t :inherit success :weight bold))
+  "Face for locally stored article marks."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-quiet-mark-face
+  '((t :inherit shadow))
+  "Face for inactive and unavailable article marks."
+  :group 'bs-gnus)
+
+(defface bs-gnus-summary-negative-mark-face
+  '((t :inherit error :weight bold))
+  "Face for rejected, failed, and low-score article marks."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-label-face
@@ -2898,6 +2954,112 @@ FIRST-P says that this is the first month in the Summary buffer."
          '(bs-gnus-mark-alignment nil display nil))
         (setq position end)))))
 
+(defun bs-gnus--summary-primary-mark-face (mark)
+  "Return the face appropriate for primary article MARK."
+  (cond
+   ((= mark gnus-unread-mark)
+    'bs-gnus-summary-unread-mark-face)
+   ((memq mark (list gnus-ticked-mark gnus-dormant-mark))
+    'bs-gnus-summary-attention-mark-face)
+   ((memq mark
+          (list gnus-ancient-mark gnus-expirable-mark
+                gnus-del-mark gnus-read-mark gnus-catchup-mark
+                gnus-sparse-mark))
+    'bs-gnus-summary-quiet-mark-face)
+   ((memq mark
+          (list gnus-killed-mark gnus-spam-mark
+                gnus-kill-file-mark gnus-low-score-mark
+                gnus-canceled-mark gnus-duplicate-mark))
+    'bs-gnus-summary-negative-mark-face)))
+
+(defun bs-gnus--summary-secondary-mark-face (mark)
+  "Return the face appropriate for secondary article MARK."
+  (cond
+   ((= mark gnus-process-mark)
+    'bs-gnus-summary-attention-mark-face)
+   ((memq mark (list gnus-cached-mark gnus-saved-mark))
+    'bs-gnus-summary-stored-mark-face)
+   ((memq mark
+          (list gnus-replied-mark gnus-forwarded-mark
+                gnus-unseen-mark))
+    'bs-gnus-summary-activity-mark-face)))
+
+(defun bs-gnus--summary-download-mark-face (mark)
+  "Return the face appropriate for Agent download MARK."
+  (cond
+   ((= mark gnus-downloaded-mark)
+    'bs-gnus-summary-stored-mark-face)
+   ((= mark gnus-undownloaded-mark)
+    'bs-gnus-summary-quiet-mark-face)
+   ((= mark gnus-downloadable-mark)
+    'bs-gnus-summary-attention-mark-face)
+   ((= mark gnus-unsendable-mark)
+    'bs-gnus-summary-negative-mark-face)))
+
+(defun bs-gnus--summary-score-mark-face (mark)
+  "Return the face appropriate for article score MARK."
+  (cond
+   ((= mark gnus-score-over-mark)
+    'bs-gnus-summary-stored-mark-face)
+   ((= mark gnus-score-below-mark)
+    'bs-gnus-summary-negative-mark-face)))
+
+(defun bs-gnus--summary-mark-face (kind mark)
+  "Return the face for mark KIND whose character is MARK."
+  (pcase kind
+    ('unread (bs-gnus--summary-primary-mark-face mark))
+    ('replied (bs-gnus--summary-secondary-mark-face mark))
+    ('download (bs-gnus--summary-download-mark-face mark))
+    ('score (bs-gnus--summary-score-mark-face mark))))
+
+(defun bs-gnus--summary-remove-mark-faces ()
+  "Remove faces previously added to individual Summary marks."
+  (let ((position (point-min)))
+    (while (setq position
+                 (text-property-not-all
+                  position (point-max) 'bs-gnus-mark-face nil))
+      (let* ((end
+              (next-single-property-change
+               position 'bs-gnus-mark-face nil (point-max)))
+             (mark-face
+              (get-text-property position 'bs-gnus-mark-face))
+             (current (get-text-property position 'face))
+             (faces
+              (cond
+               ((eq current mark-face) nil)
+               ((listp current)
+                (delq mark-face (copy-sequence current)))
+               (t current))))
+        (put-text-property position end 'face faces)
+        (remove-text-properties
+         position end '(bs-gnus-mark-face nil))
+        (setq position end)))))
+
+(defun bs-gnus--summary-apply-mark-faces ()
+  "Apply semantic faces to visible Summary status marks."
+  (bs-gnus--summary-remove-mark-faces)
+  (dolist (data gnus-newsgroup-data)
+    (save-excursion
+      (goto-char (gnus-data-pos data))
+      (let ((start (line-beginning-position))
+            (end (line-end-position)))
+        (dolist (entry gnus-summary-mark-positions)
+          (when-let* ((offset (cdr entry))
+                      (position (+ start offset))
+                      ((< position end))
+                      (mark
+                       (if (eq (car entry) 'unread)
+                           (gnus-data-mark data)
+                         (char-after position)))
+                      ((not (= mark ?\s)))
+                      (face
+                       (bs-gnus--summary-mark-face
+                        (car entry) mark)))
+            (add-face-text-property
+             position (1+ position) face nil)
+            (put-text-property
+             position (1+ position) 'bs-gnus-mark-face face)))))))
+
 (defun bs-gnus--summary-align-mark-columns ()
   "Right-align article marks with thread count labels."
   (bs-gnus--summary-remove-mark-alignment)
@@ -2923,6 +3085,7 @@ FIRST-P says that this is the first month in the Summary buffer."
   (bs-gnus--summary-remove-fold-overlays)
   (bs-gnus--summary-remove-context-overlays)
   (bs-gnus--summary-remove-mark-alignment)
+  (bs-gnus--summary-remove-mark-faces)
   (let ((inhibit-read-only t))
     (goto-char (point-min))
     (while (not (eobp))
@@ -3058,6 +3221,7 @@ FIRST-P says that this is the first month in the Summary buffer."
         (bs-gnus--summary-apply-correspondent-faces)
         (gnus-data-compute-positions)
         (bs-gnus--summary-align-mark-columns)
+        (bs-gnus--summary-apply-mark-faces)
         (let* ((count-width
                 (bs-gnus--summary-thread-count-width threads))
                (month-data
