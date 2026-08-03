@@ -30,15 +30,24 @@
 (require 'cl-lib)
 (require 'bs-lib)
 (require 'mail-parse)
+(require 'outline)
 (require 'subr-x)
 
 (declare-function message-tab "message" ())
 (declare-function bs-contacts-mail-completion-set "bs-contacts"
                   (&optional mu4e-contacts-set))
 (declare-function mu4e--modeline-update "mu4e-modeline" ())
+(declare-function mu4e--main-queue-size "mu4e-main" ())
+(declare-function mu4e--main-redraw "mu4e-main" ())
+(declare-function mu4e--main-toggle-mail-sending-mode "mu4e-main" ())
+(declare-function mu4e-main-mode "mu4e-main" ())
 (declare-function mu4e--compose-complete-handler "mu4e-compose" (str pred action))
+(declare-function mu4e-ask-maildir "mu4e-folders" (prompt))
+(declare-function mu4e-compose-new "mu4e-compose" (&optional to))
+(declare-function mu4e-context-switch "mu4e-context" (&optional force name))
 (declare-function mu4e-contact-email "mu4e-contacts")
 (declare-function mu4e-contact-name "mu4e-contacts")
+(declare-function mu4e-display-manual "mu4e" ())
 (declare-function mu4e-get-headers-buffer "mu4e-buffer" (&optional name create))
 (declare-function mu4e-get-view-buffer "mu4e-buffer" (&optional headers-buffer create))
 (declare-function mu4e-get-view-buffers "mu4e-buffer" (&optional mapfunc))
@@ -48,12 +57,20 @@
 (declare-function mu4e-headers-view-message "mu4e-headers" ())
 (declare-function mu4e-mark-at-point "mu4e-mark" (mark target))
 (declare-function mu4e-mark-docid-marked-p "mu4e-mark" (docid))
+(declare-function mu4e-mark-handle-when-leaving "mu4e-mark" ())
 (declare-function mu4e-mark-restore "mu4e-mark" (docid))
 (declare-function mu4e-message-field "mu4e-message")
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
 (declare-function mu4e-message-readable-path
                   "mu4e-message" (&optional msg))
 (declare-function mu4e-search-rerun "mu4e-search" ())
+(declare-function mu4e-query-items "mu4e-query-items" (&optional type refresh))
+(declare-function mu4e-search "mu4e-search" (&optional expr prompt edit))
+(declare-function mu4e-search-maildir "mu4e-search" (maildir &optional edit))
+(declare-function mu4e-search-query "mu4e-search" ())
+(declare-function mu4e-search-read-query "mu4e-search" (prompt &optional initial))
+(declare-function mu4e-update-mail-and-index "mu4e-update" (run-in-background))
+(declare-function smtpmail-send-queued-mail "smtpmail" ())
 (declare-function mu4e--view-html-displayed-p "mu4e-view" ())
 (declare-function mu4e--view-render-buffer "mu4e-view" (msg))
 (declare-function mu4e-action-view-in-browser
@@ -85,10 +102,13 @@
 (defvar message-mode-map)
 (defvar mu4e--mark-fringe)
 (defvar mu4e--mark-map)
+(defvar mu4e--update-timer)
 (defvar mu4e--search-msgid-target)
 (defvar mu4e--search-view-target)
 (defvar mu4e--contacts-set)
 (defvar mu4e--view-message)
+(defvar mu4e-compose-context-policy)
+(defvar mu4e-context-changed-hook)
 (defvar mu4e-found-func)
 (defvar mu4e-headers-append-func)
 (defvar mu4e-headers-date-format)
@@ -97,6 +117,8 @@
 (defvar mu4e-headers-open-after-move)
 (defvar mu4e-headers-precise-alignment)
 (defvar mu4e-headers-time-format)
+(defvar mu4e-index-update-error-continue)
+(defvar mu4e-main-buffer-name)
 (defvar mu4e-mu-version)
 (defvar mu4e-remove-func)
 (defvar mu4e-search-hide-enabled)
@@ -104,6 +126,8 @@
 (defvar mu4e-search-threads)
 (defvar mu4e-update-func)
 (defvar mu4e-use-fancy-chars)
+(defvar smtpmail-queue-mail)
+(defvar smtpmail-queue-dir)
 (defvar mu4e-view-fields)
 (defvar mu4e-view-rendered-hook)
 (defvar mu4e~headers-hidden)
@@ -116,6 +140,827 @@
 (defgroup bs-mu4e nil
   "Personal mu4e extensions."
   :group 'mu4e)
+
+(defface bs-mu4e-main-header-face
+  '((t :inherit header-line :height 1.0))
+  "Base face used for the complete Mu4e Main header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-header-label-face
+  '((t :inherit header-line :weight bold))
+  "Face used for labels in the Mu4e Main header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-header-value-face
+  '((t :inherit font-lock-keyword-face :slant italic))
+  "Face used for dynamic values in the Mu4e Main header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-header-context-face
+  '((t :inherit font-lock-keyword-face :slant normal))
+  "Face used for the active context in the Mu4e Main header."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-header-unread-face
+  '((t :inherit error :weight semi-bold :slant normal))
+  "Face used for the unread count in the Mu4e Main header."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-header-muted-face
+  '((t :inherit shadow :weight normal :slant normal))
+  "Face used for secondary statistics in the Mu4e Main header."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-topic-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face used for Mu4e Main topics."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-root-face
+  '((t :inherit bs-mu4e-main-topic-face :height 1.30))
+  "Face used for the Mu4e Main root topic."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-top-level-face
+  '((t :inherit bs-mu4e-main-topic-face :height 1.15))
+  "Face used for top-level Mu4e Main topics."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-topic-count-face
+  '((t :inherit error :weight semi-bold))
+  "Face used for nonzero Mu4e Main topic counts."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-empty-count-face
+  '((t :inherit shadow))
+  "Face used for empty Mu4e Main topic counts."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-unread-count-face
+  '((t :inherit error :weight bold))
+  "Face used for unread Mu4e Main row counts."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-read-count-face
+  '((t :inherit shadow))
+  "Face used for zero unread Mu4e Main row counts."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-total-face
+  '((t :inherit shadow))
+  "Face used for total Mu4e Main row counts."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-separator-face
+  '((t :inherit shadow))
+  "Face used for Mu4e Main separators."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-unread-name-face
+  '((t :inherit default :weight bold))
+  "Face used for Mu4e Main rows containing unread messages."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-read-name-face
+  '((t :inherit shadow))
+  "Face used for Mu4e Main rows without unread messages."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-main-source-face
+  '((t :inherit shadow))
+  "Face used for Mu4e Main row metadata."
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-root-name "Mu4e"
+  "Name of the synthetic Mu4e Main root topic."
+  :type 'string
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-update-retry-interval 120
+  "Seconds before retrying a failed Mu4e update."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-topic-line-spacing 0.65
+  "Relative spacing added around Mu4e Main topic rows."
+  :type 'number
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-header-bottom-spacing 0.5
+  "Relative line height reserved below the Mu4e Main header."
+  :type 'number
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-row-indentation-width 4
+  "Columns reserved before Mu4e Main row statistics."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-minimum-count-width 9
+  "Minimum width of the Mu4e Main row count column."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-right-margin-width 1
+  "Columns reserved after Mu4e Main row metadata."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-main-fallback-width 100
+  "Width used to render Mu4e Main when it is not displayed."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defvar bs-mu4e-context-name "bingshan"
+  "Name of the active Mu4e context.")
+
+(defvar bs-mu4e-context-query ""
+  "Query restricting searches to the active Mu4e context.")
+
+(defvar bs-mu4e--main-enabled nil
+  "Non-nil when the custom Mu4e Main renderer is installed.")
+
+(defvar bs-mu4e--main-update-state 'idle
+  "Current Mu4e Main update state.")
+
+(defvar bs-mu4e--main-update-failed-p nil
+  "Non-nil when mail retrieval failed during the current update.")
+
+(defvar bs-mu4e--main-retry-timer nil
+  "Timer used to retry failed Mu4e updates.")
+
+(defvar bs-mu4e--main-clock-timer nil
+  "Timer used to refresh relative times in the Mu4e Main header.")
+
+(defvar-local bs-mu4e--main-render-width nil
+  "Width used for the latest Mu4e Main rendering.")
+
+(defvar-local bs-mu4e--main-resize-timer nil
+  "Pending Mu4e Main resize refresh timer.")
+
+(defun bs-mu4e--main-single-line (value fallback)
+  "Return VALUE as a trimmed single line, or FALLBACK when empty."
+  (let ((value
+         (string-trim
+          (replace-regexp-in-string
+           "[\n\r\t ]+" " " (or value "")))))
+    (if (string-empty-p value) fallback value)))
+
+(defun bs-mu4e--main-truncate (string width)
+  "Truncate STRING with an ASCII ellipsis to fit WIDTH columns."
+  (cond
+   ((<= width 0) "")
+   ((<= (string-width string) width) string)
+   ((<= width 3) (truncate-string-to-width string width))
+   (t
+    (concat (truncate-string-to-width string (- width 3)) "..."))))
+
+(defun bs-mu4e--main-buffer-width ()
+  "Return the displayed width of the current Mu4e Main buffer."
+  (if-let* ((window (get-buffer-window (current-buffer) t)))
+      (window-body-width window)
+    bs-mu4e-main-fallback-width))
+
+(defun bs-mu4e--main-top-spacing-prefix (spacing)
+  "Return a zero-width line prefix adding SPACING above a row."
+  (propertize
+   " " 'display
+   `(space :width 0 :height ,(+ 1.0 (max 0 spacing)) :ascent 100)))
+
+(defun bs-mu4e--main-header-right-padding (string)
+  "Return pixel-aware padding that right-aligns STRING."
+  (propertize
+   " " 'display
+   `(space :align-to (- right (+ (,(string-pixel-width string)) 1)))))
+
+(defun bs-mu4e--main-query-items ()
+  "Return current bookmark query items without signaling errors."
+  (condition-case nil
+      (mu4e-query-items 'bookmarks)
+    (error nil)))
+
+(defun bs-mu4e--main-visible-bookmarks (items)
+  "Return visible bookmark ITEMS."
+  (seq-filter
+   (lambda (item)
+     (and (characterp (plist-get item :key))
+          (not (plist-get item :bs-hidden))))
+   items))
+
+(defun bs-mu4e--main-maildirs (items)
+  "Return Maildir query ITEMS sorted by display name."
+  (sort
+   (seq-filter (lambda (item) (plist-get item :bs-maildir)) items)
+   (lambda (left right)
+     (string-lessp (plist-get left :name) (plist-get right :name)))))
+
+(defun bs-mu4e--main-summary (items)
+  "Return the context summary item from ITEMS."
+  (seq-find (lambda (item) (plist-get item :bs-context-summary)) items))
+
+(defun bs-mu4e--main-unread-bookmark (items)
+  "Return the unread bookmark from ITEMS."
+  (seq-find (lambda (item) (eq (plist-get item :key) ?u)) items))
+
+(defun bs-mu4e--main-count-widths (items)
+  "Return aligned unread and total count widths for ITEMS."
+  (let ((unread-width 2)
+        (total-width 1))
+    (dolist (item items)
+      (setq unread-width
+            (max unread-width
+                 (string-width
+                  (number-to-string (or (plist-get item :unread) 0))))
+            total-width
+            (max total-width
+                 (string-width
+                  (number-to-string (or (plist-get item :count) 0))))))
+    (setq total-width
+          (+ total-width
+             (max 0 (- bs-mu4e-main-minimum-count-width
+                       unread-width 1 total-width))))
+    (list unread-width total-width)))
+
+(defun bs-mu4e--main-count (item widths)
+  "Format ITEM counts using WIDTHS."
+  (let* ((unread (or (plist-get item :unread) 0))
+         (total (or (plist-get item :count) 0))
+         (unread-string (number-to-string unread))
+         (total-string (number-to-string total))
+         (unread-width (nth 0 widths))
+         (total-width (nth 1 widths)))
+    (concat
+     (propertize
+      (format (format "%%%ds" unread-width) unread-string)
+      'face (if (> unread 0)
+                'bs-mu4e-main-unread-count-face
+              'bs-mu4e-main-read-count-face))
+     (propertize "/" 'face 'bs-mu4e-main-separator-face)
+     (propertize total-string 'face 'bs-mu4e-main-total-face)
+     (make-string
+      (max 0 (- total-width (string-width total-string))) ?\s))))
+
+(defun bs-mu4e--main-empty-count (widths)
+  "Return an empty count column with an aligned separator using WIDTHS."
+  (concat
+   (make-string (nth 0 widths) ?\s)
+   (propertize "/" 'face 'bs-mu4e-main-separator-face)
+   (make-string (nth 1 widths) ?\s)))
+
+(defun bs-mu4e--main-heading-display (collapsed)
+  "Return a heading prefix according to COLLAPSED."
+  (if collapsed "▸ " "  "))
+
+(defun bs-mu4e--main-insert-topic (name count level root-p)
+  "Insert topic NAME with COUNT at LEVEL.
+ROOT-P identifies the synthetic root."
+  (let* ((start (point))
+         (stars (make-string level ?*))
+         (label-face
+          (if root-p 'bs-mu4e-main-root-face
+            'bs-mu4e-main-top-level-face))
+         (label (propertize name 'face label-face))
+         (body
+          (if root-p label
+            (concat
+             label
+             (propertize " (" 'face 'bs-mu4e-main-separator-face)
+             (if (stringp count)
+                 (propertize count 'face 'mu4e-highlight-face)
+               (propertize
+                (number-to-string count)
+                'face (if (> count 0)
+                          'bs-mu4e-main-topic-count-face
+                        'bs-mu4e-main-empty-count-face)))
+             (propertize ")" 'face 'bs-mu4e-main-separator-face)))))
+    (put-text-property
+     0 (length stars) 'display
+     (bs-mu4e--main-heading-display nil) stars)
+    (insert
+     (propertize
+      (concat stars body)
+      'bs-mu4e-main-heading name
+      'mouse-face 'highlight)
+     ?\n)
+    (add-text-properties
+     start (1+ start)
+     `(line-prefix
+       ,(bs-mu4e--main-top-spacing-prefix
+         (+ bs-mu4e-main-topic-line-spacing
+            (if root-p bs-mu4e-main-header-bottom-spacing 0)))))))
+
+(defun bs-mu4e--main-row-command (command)
+  "Return a no-argument interactive wrapper for COMMAND."
+  (lambda ()
+    (interactive)
+    (call-interactively command)))
+
+(defun bs-mu4e--main-insert-row
+    (count shortcut name source command widths render-width &optional action-p)
+  "Insert a Mu4e Main row.
+COUNT is a query item or nil.  SHORTCUT, NAME, and SOURCE are its
+display fields.  COMMAND activates the row.  WIDTHS and
+RENDER-WIDTH control layout.  ACTION-P uses the ordinary name face."
+  (let* ((count-string
+          (if count
+              (bs-mu4e--main-count count widths)
+            (bs-mu4e--main-empty-count widths)))
+         (indentation
+          (make-string bs-mu4e-main-row-indentation-width ?\s))
+         (shortcut (format "[%s]" shortcut))
+         (count-gap-width (if action-p 3 2))
+         (prefix-width
+          (+ bs-mu4e-main-row-indentation-width
+             (nth 0 widths) 1 (nth 1 widths) count-gap-width
+             (string-width shortcut) 1))
+         (content-width
+          (max 0 (- render-width prefix-width
+                    bs-mu4e-main-right-margin-width)))
+         (source (bs-mu4e--main-single-line source ""))
+         (source-width (min (string-width source)
+                            (max 0 (- content-width 2))))
+         (source (bs-mu4e--main-truncate source source-width))
+         (name-width
+          (max 0 (- content-width (string-width source)
+                    (if (string-empty-p source) 0 2))))
+         (name (bs-mu4e--main-truncate
+                (bs-mu4e--main-single-line name "[unnamed]")
+                name-width))
+         (padding
+          (make-string
+           (max 0 (- content-width (string-width name)
+                     (string-width source))) ?\s))
+         (name-face
+          (cond
+           (action-p 'default)
+           ((> (or (plist-get count :unread) 0) 0)
+            'bs-mu4e-main-unread-name-face)
+           (t 'bs-mu4e-main-read-name-face)))
+         (line
+          (concat
+           indentation count-string
+           (make-string count-gap-width ?\s)
+           (propertize shortcut 'face 'mu4e-highlight-face) " "
+           (propertize name 'face name-face)
+           padding
+           (propertize source 'face 'bs-mu4e-main-source-face)
+           (make-string bs-mu4e-main-right-margin-width ?\s))))
+    (insert
+     (propertize
+      line
+      'bs-mu4e-main-command (bs-mu4e--main-row-command command)
+      'mouse-face 'highlight)
+     ?\n)))
+
+(defun bs-mu4e--main-add-trailing-topic-spacing ()
+  "Add lower spacing after each final consecutive topic row."
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let* ((position (line-beginning-position))
+             (topic (get-text-property position 'bs-mu4e-main-heading))
+             (newline (line-end-position))
+             (next-topic
+              (get-text-property
+               (line-beginning-position 2) 'bs-mu4e-main-heading)))
+        (when (and topic (not next-topic))
+          (add-text-properties
+           newline (1+ newline)
+           `(line-spacing ,bs-mu4e-main-topic-line-spacing)))
+        (forward-line 1)))))
+
+(defun bs-mu4e--main-action-items ()
+  "Return the Mu4e Main action row specifications."
+  (append
+   `(("c" "Choose query" ,bs-mu4e-context-name ,#'mu4e-search-query)
+     ("C" "Compose"
+      ,(symbol-name
+        (or (and (boundp 'mu4e-compose-context-policy)
+                 mu4e-compose-context-policy)
+            'ask))
+      ,#'mu4e-compose-new))
+   (when (and (boundp 'smtpmail-queue-dir)
+              (stringp smtpmail-queue-dir)
+              (file-directory-p smtpmail-queue-dir)
+              (> (mu4e--main-queue-size) 0))
+     `(("f" ,(format "Flush %d queued mails"
+                     (mu4e--main-queue-size))
+        "global" ,#'smtpmail-send-queued-mail)))
+   `(("j" "Jump to maildir" ,bs-mu4e-context-name ,#'mu4e-search-maildir)
+     ("s" "Search" "global" ,#'mu4e-search)
+     (";" "Switch context" ,bs-mu4e-context-name ,#'mu4e-context-switch)
+     ("m" "Toggle mail sending mode"
+      ,(if (bound-and-true-p smtpmail-queue-mail) "queued" "direct")
+      ,#'mu4e--main-toggle-mail-sending-mode)
+     ("U" "Update email and database" "global"
+      ,(lambda () (interactive) (mu4e-update-mail-and-index t))))))
+
+(defun bs-mu4e--main-search-query (query)
+  "Search for QUERY from a Mu4e Main row."
+  (lambda ()
+    (interactive)
+    (mu4e-search query)))
+
+(defun bs-mu4e--main-insert-actions (widths render-width)
+  "Insert Action rows using WIDTHS and RENDER-WIDTH."
+  (dolist (action (bs-mu4e--main-action-items))
+    (pcase-let ((`(,key ,name ,source ,command) action))
+      (bs-mu4e--main-insert-row
+       nil key name source command widths render-width t))))
+
+(defun bs-mu4e--main-insert-bookmarks (items widths render-width)
+  "Insert bookmark ITEMS using WIDTHS and RENDER-WIDTH."
+  (dolist (item items)
+    (let ((query (plist-get item :query)))
+      (bs-mu4e--main-insert-row
+       item
+       (format "b%c" (plist-get item :key))
+       (plist-get item :name)
+       (plist-get item :source)
+       (bs-mu4e--main-search-query query)
+       widths render-width))))
+
+(defun bs-mu4e--main-insert-maildirs (items widths render-width)
+  "Insert Maildir ITEMS using WIDTHS and RENDER-WIDTH."
+  (dolist (item items)
+    (let ((query (plist-get item :query)))
+      (bs-mu4e--main-insert-row
+       item
+       (format "j%c" (plist-get item :bs-maildir-key))
+       (plist-get item :name)
+       (plist-get item :source)
+       (bs-mu4e--main-search-query query)
+       widths render-width))))
+
+(defun bs-mu4e--main-update-indicators (&rest _)
+  "Update visible Mu4e Main disclosure indicators."
+  (when (derived-mode-p 'mu4e-main-mode)
+    (with-silent-modifications
+      (let ((inhibit-read-only t)
+            (origin (point)))
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (while (re-search-forward "^\\(\\*+\\)" nil t)
+            (let* ((beginning (match-beginning 1))
+                   (end (match-end 1))
+                   (next-line (line-beginning-position 2))
+                   (collapsed
+                    (and (< next-line (point-max))
+                         (outline-invisible-p next-line))))
+              (put-text-property
+               beginning end 'display
+               (bs-mu4e--main-heading-display collapsed)))))
+        (goto-char (min origin (point-max)))))))
+
+(defun bs-mu4e-main-activate ()
+  "Toggle the topic or activate the Mu4e Main row at point."
+  (interactive)
+  (if-let* ((command
+             (get-text-property
+              (line-beginning-position) 'bs-mu4e-main-command)))
+      (funcall command)
+    (if (get-text-property
+         (line-beginning-position) 'bs-mu4e-main-heading)
+        (progn
+          (outline-toggle-children)
+          (bs-mu4e--main-update-indicators))
+      (user-error "No Mu4e Main action on this row"))))
+
+(defun bs-mu4e-main-toggle-topic ()
+  "Toggle the Mu4e Main topic at point."
+  (interactive)
+  (unless (get-text-property
+           (line-beginning-position) 'bs-mu4e-main-heading)
+    (user-error "No Mu4e Main topic on this row"))
+  (outline-toggle-children)
+  (bs-mu4e--main-update-indicators))
+
+(defun bs-mu4e--main-time-text (timer)
+  "Return remaining time for TIMER in minutes."
+  (if (not (timerp timer))
+      "not scheduled"
+    (let ((seconds (max 0 (- (timer-until timer nil)))))
+      (if (< seconds 60)
+          "<1 minutes"
+        (format "%d minutes" (ceiling (/ seconds 60.0)))))))
+
+(defun bs-mu4e--main-update-status ()
+  "Return the current update status for the header line."
+  (pcase bs-mu4e--main-update-state
+    ('retrieving
+     (propertize "RETRIEVING" 'face 'bs-mu4e-main-header-label-face))
+    ('indexing
+     (propertize "INDEXING" 'face 'bs-mu4e-main-header-label-face))
+    ('retry
+     (concat
+      (propertize "NEXT RETRY" 'face 'bs-mu4e-main-header-label-face)
+      " "
+      (propertize
+       (bs-mu4e--main-time-text bs-mu4e--main-retry-timer)
+       'face 'bs-mu4e-main-header-value-face)))
+    (_
+     (concat
+      (propertize "NEXT UPDATE" 'face 'bs-mu4e-main-header-label-face)
+      " "
+      (propertize
+       (bs-mu4e--main-time-text
+        (and (boundp 'mu4e--update-timer) mu4e--update-timer))
+       'face 'bs-mu4e-main-header-value-face)))))
+
+(defun bs-mu4e--main-statistics (summary bookmark-count variant)
+  "Return right-side statistics for SUMMARY and BOOKMARK-COUNT.
+VARIANT is `full', `no-bookmarks', or `compact'."
+  (let ((unread (or (plist-get summary :unread) 0))
+        (messages (or (plist-get summary :count) 0))
+        (separator (propertize " · " 'face 'bs-mu4e-main-separator-face)))
+    (concat
+     (propertize
+      bs-mu4e-context-name 'face 'bs-mu4e-main-header-context-face)
+     (unless (eq variant 'compact)
+       (concat
+        separator
+        (when (eq variant 'full)
+          (concat
+           (propertize
+            (format "%d bookmarks" bookmark-count)
+            'face 'bs-mu4e-main-header-muted-face)
+           separator))
+        (propertize
+         (number-to-string unread)
+         'face 'bs-mu4e-main-header-unread-face)
+        (propertize " unread" 'face 'bs-mu4e-main-header-muted-face)
+        (when (memq variant '(full no-bookmarks))
+          (concat
+           separator
+           (propertize
+            (format "%d total" messages)
+            'face 'bs-mu4e-main-header-muted-face)))))
+     (when (eq variant 'compact)
+       (concat
+        separator
+        (propertize
+         (number-to-string unread)
+         'face 'bs-mu4e-main-header-unread-face)
+        (propertize " unread" 'face 'bs-mu4e-main-header-muted-face))))))
+
+(defun bs-mu4e--main-header ()
+  "Return the Mu4e Main header line."
+  (let* ((items (bs-mu4e--main-query-items))
+         (bookmarks (bs-mu4e--main-visible-bookmarks items))
+         (summary-item (bs-mu4e--main-summary items))
+         (unread-item (bs-mu4e--main-unread-bookmark bookmarks))
+         (summary
+          (if unread-item
+              (plist-put
+               (copy-sequence summary-item)
+               :unread (plist-get unread-item :count))
+            summary-item))
+         (left (bs-mu4e--main-update-status))
+         (width (bs-mu4e--main-buffer-width))
+         (full (bs-mu4e--main-statistics summary (length bookmarks) 'full))
+         (no-bookmarks
+          (bs-mu4e--main-statistics
+           summary (length bookmarks) 'no-bookmarks))
+         (compact
+          (bs-mu4e--main-statistics summary (length bookmarks) 'compact))
+         (right
+          (cond
+           ((<= (+ (string-width left) (string-width full) 2) width) full)
+           ((<= (+ (string-width left) (string-width no-bookmarks) 2)
+                width)
+            no-bookmarks)
+           (t compact)))
+         (header
+          (concat left (bs-mu4e--main-header-right-padding right) right)))
+    (add-face-text-property
+     0 (length header) 'bs-mu4e-main-header-face t header)
+    header))
+
+(defun bs-mu4e--main-redraw ()
+  "Redraw the custom Mu4e Main buffer if it exists."
+  (when-let* ((buffer (get-buffer mu4e-main-buffer-name))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (let* ((origin-line (line-number-at-pos))
+             (origin-column (current-column))
+             (restore
+              (and (derived-mode-p 'mu4e-main-mode)
+                   (outline-revert-buffer-restore-visibility)))
+             (inhibit-read-only t)
+             (items (bs-mu4e--main-query-items))
+             (bookmarks (bs-mu4e--main-visible-bookmarks items))
+             (maildirs (bs-mu4e--main-maildirs items))
+             (summary (bs-mu4e--main-summary items))
+             (unread-item (bs-mu4e--main-unread-bookmark bookmarks))
+             (unread (or (plist-get unread-item :count)
+                         (plist-get summary :unread) 0))
+             (widths (bs-mu4e--main-count-widths
+                      (append bookmarks maildirs)))
+             (render-width (bs-mu4e--main-buffer-width)))
+        (unless (derived-mode-p 'mu4e-main-mode)
+          (mu4e-main-mode))
+        (setq bs-mu4e--main-render-width render-width)
+        (erase-buffer)
+        (bs-mu4e--main-insert-topic
+         bs-mu4e-main-root-name nil 1 t)
+        (bs-mu4e--main-insert-topic "Actions" "h" 2 nil)
+        (bs-mu4e--main-insert-actions widths render-width)
+        (bs-mu4e--main-insert-topic "Bookmarks" unread 2 nil)
+        (bs-mu4e--main-insert-bookmarks bookmarks widths render-width)
+        (bs-mu4e--main-insert-topic "Maildirs" unread 2 nil)
+        (bs-mu4e--main-insert-maildirs maildirs widths render-width)
+        (bs-mu4e--main-add-trailing-topic-spacing)
+        (when restore (funcall restore))
+        (bs-mu4e--main-update-indicators)
+        (goto-char (point-min))
+        (forward-line (1- origin-line))
+        (move-to-column origin-column)
+        (set-buffer-modified-p nil)
+        (force-mode-line-update)))))
+
+(defun bs-mu4e--main-force-header-update ()
+  "Refresh the Mu4e Main header if its buffer exists."
+  (when-let* ((buffer (get-buffer mu4e-main-buffer-name)))
+    (with-current-buffer buffer
+      (force-mode-line-update t))))
+
+(defun bs-mu4e--main-cancel-retry ()
+  "Cancel the pending Mu4e update retry timer."
+  (when (timerp bs-mu4e--main-retry-timer)
+    (cancel-timer bs-mu4e--main-retry-timer))
+  (setq bs-mu4e--main-retry-timer nil))
+
+(defun bs-mu4e--main-retry-update ()
+  "Retry a failed Mu4e update in the background."
+  (setq bs-mu4e--main-retry-timer nil)
+  (mu4e-update-mail-and-index t))
+
+(defun bs-mu4e--main-schedule-retry ()
+  "Schedule a background retry after an update failure."
+  (bs-mu4e--main-cancel-retry)
+  (setq bs-mu4e--main-update-state 'retry
+        bs-mu4e--main-retry-timer
+        (run-at-time
+         (max 1 bs-mu4e-main-update-retry-interval) nil
+         #'bs-mu4e--main-retry-update))
+  (bs-mu4e--main-force-header-update))
+
+(defun bs-mu4e--main-update-started ()
+  "Record the start of Mu4e mail retrieval."
+  (bs-mu4e--main-cancel-retry)
+  (setq bs-mu4e--main-update-failed-p nil
+        bs-mu4e--main-update-state 'retrieving)
+  (bs-mu4e--main-force-header-update))
+
+(defun bs-mu4e--main-index-started (&rest _)
+  "Record the start of Mu4e indexing."
+  (setq bs-mu4e--main-update-state 'indexing)
+  (bs-mu4e--main-force-header-update))
+
+(defun bs-mu4e--main-retrieval-finished (process &rest _)
+  "Record failure when retrieval PROCESS exits unsuccessfully."
+  (setq bs-mu4e--main-update-failed-p
+        (or (not (eq (process-status process) 'exit))
+            (/= (process-exit-status process) 0))))
+
+(defun bs-mu4e--main-retrieval-cleanup (&rest _)
+  "Schedule a retry when failed retrieval does not continue indexing."
+  (when (and bs-mu4e--main-update-failed-p
+             (not mu4e-index-update-error-continue))
+    (bs-mu4e--main-schedule-retry)))
+
+(defun bs-mu4e--main-index-finished ()
+  "Record the completion of Mu4e indexing."
+  (if bs-mu4e--main-update-failed-p
+      (bs-mu4e--main-schedule-retry)
+    (bs-mu4e--main-cancel-retry)
+    (setq bs-mu4e--main-update-state 'idle)
+    (bs-mu4e--main-force-header-update)))
+
+(defun bs-mu4e--main-filtered-maildir-item (maildir)
+  "Return the active context query item for MAILDIR."
+  (seq-find
+   (lambda (item)
+     (and (plist-get item :bs-maildir)
+          (equal (plist-get item :maildir) maildir)))
+   (bs-mu4e--main-query-items)))
+
+(defun bs-mu4e--main-search-maildir (maildir &optional edit)
+  "Search MAILDIR within the active context.
+With EDIT, offer to edit the generated query first."
+  (interactive
+   (let ((maildir (mu4e-ask-maildir "Jump to maildir: ")))
+     (list maildir current-prefix-arg)))
+  (when maildir
+    (let* ((item (bs-mu4e--main-filtered-maildir-item maildir))
+           (query
+            (or (plist-get item :query)
+                (format "(%s) AND (maildir:\"%s\")"
+                        bs-mu4e-context-query maildir)))
+           (query
+            (if edit
+                (mu4e-search-read-query "Refine query: " query)
+              query)))
+      (mu4e-mark-handle-when-leaving)
+      (mu4e-search query))))
+
+(defun bs-mu4e--main-resize-refresh (buffer)
+  "Redraw Mu4e Main BUFFER after a resize."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq bs-mu4e--main-resize-timer nil)
+      (bs-mu4e--main-redraw))))
+
+(defun bs-mu4e--main-window-size-change (_frame)
+  "Schedule a redraw when the Mu4e Main window width changes."
+  (when-let* ((buffer (get-buffer mu4e-main-buffer-name))
+              (window (get-buffer-window buffer t)))
+    (with-current-buffer buffer
+      (let ((width (window-body-width window)))
+        (unless (equal width bs-mu4e--main-render-width)
+          (when (timerp bs-mu4e--main-resize-timer)
+            (cancel-timer bs-mu4e--main-resize-timer))
+          (setq bs-mu4e--main-resize-timer
+                (run-at-time
+                 0.2 nil #'bs-mu4e--main-resize-refresh buffer)))))))
+
+(defun bs-mu4e--main-configure-buffer ()
+  "Configure the current Mu4e Main buffer."
+  (setq-local truncate-lines t
+              header-line-format '(:eval (bs-mu4e--main-header))
+              outline-regexp "\\*+")
+  (outline-minor-mode 1)
+  (hl-line-mode 1)
+  (use-local-map (copy-keymap (current-local-map)))
+  (local-set-key (kbd "RET") #'bs-mu4e-main-activate)
+  (local-set-key (kbd "TAB") #'bs-mu4e-main-toggle-topic)
+  (local-set-key (kbd "<tab>") #'bs-mu4e-main-toggle-topic)
+  (local-set-key (kbd "h") #'mu4e-display-manual)
+  (add-hook 'post-command-hook
+            #'bs-mu4e--main-update-indicators nil t))
+
+;;;###autoload
+(defun bs-mu4e-main-enable ()
+  "Enable the Gnus-inspired Mu4e Main renderer."
+  (interactive)
+  (require 'mu4e-main)
+  (require 'mu4e-search)
+  (require 'mu4e-update)
+  (require 'outline)
+  (unless bs-mu4e--main-enabled
+    (setq bs-mu4e--main-enabled t)
+    (advice-add 'mu4e--main-redraw :override #'bs-mu4e--main-redraw)
+    (advice-add 'mu4e-search-maildir :override
+                #'bs-mu4e--main-search-maildir)
+    (advice-add 'mu4e-update-index :before
+                #'bs-mu4e--main-index-started)
+    (advice-add 'mu4e--update-sentinel-func :before
+                #'bs-mu4e--main-retrieval-finished)
+    (advice-add 'mu4e--update-sentinel-func :after
+                #'bs-mu4e--main-retrieval-cleanup)
+    (add-hook 'mu4e-main-mode-hook #'bs-mu4e--main-configure-buffer)
+    (add-hook 'mu4e-context-changed-hook #'bs-mu4e--main-redraw)
+    (add-hook 'mu4e-update-pre-hook #'bs-mu4e--main-update-started)
+    (add-hook 'mu4e-index-updated-hook #'bs-mu4e--main-index-finished)
+    (add-hook 'window-size-change-functions
+              #'bs-mu4e--main-window-size-change)
+    (unless (timerp bs-mu4e--main-clock-timer)
+      (setq bs-mu4e--main-clock-timer
+            (run-at-time 0 30 #'bs-mu4e--main-force-header-update))))
+  (when-let* ((buffer (get-buffer mu4e-main-buffer-name)))
+    (with-current-buffer buffer
+      (bs-mu4e--main-configure-buffer)
+      (bs-mu4e--main-redraw))))
+
+;;;###autoload
+(defun bs-mu4e-main-disable ()
+  "Restore Mu4e's native Main renderer."
+  (interactive)
+  (when bs-mu4e--main-enabled
+    (setq bs-mu4e--main-enabled nil)
+    (advice-remove 'mu4e--main-redraw #'bs-mu4e--main-redraw)
+    (advice-remove 'mu4e-search-maildir
+                   #'bs-mu4e--main-search-maildir)
+    (advice-remove 'mu4e-update-index #'bs-mu4e--main-index-started)
+    (advice-remove 'mu4e--update-sentinel-func
+                   #'bs-mu4e--main-retrieval-finished)
+    (advice-remove 'mu4e--update-sentinel-func
+                   #'bs-mu4e--main-retrieval-cleanup)
+    (remove-hook 'mu4e-main-mode-hook #'bs-mu4e--main-configure-buffer)
+    (remove-hook 'mu4e-context-changed-hook #'bs-mu4e--main-redraw)
+    (remove-hook 'mu4e-update-pre-hook #'bs-mu4e--main-update-started)
+    (remove-hook 'mu4e-index-updated-hook #'bs-mu4e--main-index-finished)
+    (remove-hook 'window-size-change-functions
+                 #'bs-mu4e--main-window-size-change)
+    (bs-mu4e--main-cancel-retry)
+    (when (timerp bs-mu4e--main-clock-timer)
+      (cancel-timer bs-mu4e--main-clock-timer))
+    (setq bs-mu4e--main-clock-timer nil)
+    (when-let* ((buffer (get-buffer mu4e-main-buffer-name)))
+      (with-current-buffer buffer
+        (mu4e-main-mode)))
+    (mu4e--main-redraw)))
 
 (defface bs-mu4e-headers-title-face
   '((t :inherit mu4e-header-title-face :weight bold))
