@@ -40,6 +40,8 @@
 (declare-function mail-header-number "nnheader" (header))
 (declare-function mail-header-references "nnheader" (header))
 (declare-function mail-header-subject "nnheader" (header))
+(declare-function mail-decode-encoded-word-string "mail-parse" (string))
+(declare-function mail-extract-address-components "mail-extr" (address))
 (declare-function gnus-data-compute-positions "gnus-sum" ())
 (declare-function gnus-data-header "gnus-sum" (data))
 (declare-function gnus-data-level "gnus-sum" (data))
@@ -116,6 +118,12 @@
 (declare-function gnus-status-message "gnus" (command-method))
 (declare-function gnus-summary-insert-articles
                   "gnus-sum" (articles))
+(declare-function gnus-ignored-from-addresses "gnus-sum" ())
+(declare-function gnus-notifications-notify
+                  "gnus-notifications"
+                  (from subject &optional photo-file))
+(declare-function gravatar-retrieve-synchronously "gravatar" (mail-address))
+(declare-function range-member-p "range" (number ranges))
 
 (defvar gnus-current-article)
 (defvar auth-sources)
@@ -189,6 +197,13 @@
 (defvar gnus-summary-line-format)
 (defvar gnus-summary-mark-positions)
 (defvar gnus-summary-buffer)
+(defvar gnus-notifications-id-to-msg)
+(defvar gnus-notifications-minimum-level)
+(defvar gnus-notifications-sent)
+(defvar gnus-notifications-use-gravatar)
+(defvar gnus-ignored-from-addresses)
+(defvar gravatar-default-image)
+(defvar gravatar-size)
 (defvar gnus-ticked-mark)
 (defvar gnus-topic-alist)
 (defvar gnus-topic-indent-level)
@@ -503,6 +518,18 @@ After exhausting the list, continue using its final delay."
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-notifications-avatar-cache-directory
+  (locate-user-emacs-file "cache/gnus/notification-avatars/")
+  "Directory containing persistent notification avatars."
+  :type 'directory
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-notifications-avatar-cache-expiry
+  (* 90 24 60 60)
+  "Seconds before a cached notification avatar expires."
+  :type 'natnum
+  :group 'bs-gnus)
+
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
 
@@ -631,6 +658,24 @@ After exhausting the list, continue using its final delay."
 (defvar bs-gnus--update-worker-auth-source-search-function nil
   "Original `auth-source-search' function in an update worker.")
 
+(defvar bs-gnus--update-worker-live-agent-directory nil
+  "Live Agent directory read by an isolated update worker.")
+
+(defvar bs-gnus--update-worker-avatar-cache-directory nil
+  "Persistent avatar cache written by an isolated update worker.")
+
+(defvar bs-gnus--update-worker-avatar-cache-expiry nil
+  "Avatar cache lifetime used by an isolated update worker.")
+
+(defvar bs-gnus--update-worker-gravatar-default-image nil
+  "Gravatar fallback policy used by an isolated update worker.")
+
+(defvar bs-gnus--update-worker-gravatar-size nil
+  "Gravatar image size used by an isolated update worker.")
+
+(defvar bs-gnus--notifications-enabled nil
+  "Non-nil when the background-update notification adapter is enabled.")
+
 (defvar bs-gnus--update-header-map
   (let ((map (make-sparse-keymap)))
     (define-key map [header-line mouse-1] #'bs-gnus-update)
@@ -638,7 +683,7 @@ After exhausting the list, continue using its final delay."
     map)
   "Keymap used by the clickable Group update status.")
 
-(defconst bs-gnus--update-protocol-version 1
+(defconst bs-gnus--update-protocol-version 2
   "Protocol version shared with background update workers.")
 
 (defconst bs-gnus--update-header-chunk-size 200
@@ -700,6 +745,139 @@ After exhausting the list, continue using its final delay."
             (<= low article high)))
      articles)))
 
+(defun bs-gnus--update-worker-decode-header (value)
+  "Decode the mail header field VALUE without failing an update."
+  (condition-case nil
+      (mail-decode-encoded-word-string (or value ""))
+    (error (or value ""))))
+
+(defun bs-gnus--update-worker-overview-records
+    (file group articles)
+  "Return notification records for ARTICLES in overview FILE and GROUP."
+  (let ((wanted (make-hash-table :test #'eql))
+        (records (make-hash-table :test #'eql)))
+    (dolist (article articles)
+      (puthash article t wanted))
+    (when (file-readable-p file)
+      (require 'mail-extr)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^\\([0-9]+\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\t"
+                nil t)
+          (let ((article (string-to-number (match-string 1))))
+            (when (gethash article wanted)
+              (let* ((raw-subject (match-string 2))
+                     (raw-from (match-string 3))
+                     (date (match-string 4))
+                     (subject
+                      (bs-gnus--update-worker-decode-header
+                       raw-subject))
+                     (from
+                      (bs-gnus--update-worker-decode-header
+                       raw-from))
+                     (address-parts
+                      (mail-extract-address-components from))
+                     (sender
+                      (or (car address-parts)
+                          (cadr address-parts)
+                          from
+                          "Unknown sender"))
+                     (address (cadr address-parts))
+                     (timestamp
+                      (condition-case nil
+                          (float-time (date-to-time date))
+                        (error 0.0))))
+                (puthash
+                 article
+                 (list :group group
+                       :article article
+                       :sender sender
+                       :address address
+                       :subject (if (string-empty-p subject)
+                                    "(no subject)"
+                                  subject)
+                       :timestamp timestamp)
+                 records)))))))
+    (delq nil
+          (mapcar (lambda (article) (gethash article records))
+                  articles))))
+
+(defun bs-gnus--update-worker-avatar-current-p (file)
+  "Return non-nil when cached avatar FILE is present and current."
+  (when-let* ((attributes (file-attributes file)))
+    (and (> (file-attribute-size attributes) 0)
+         (< (float-time
+             (time-subtract
+              (current-time)
+              (file-attribute-modification-time attributes)))
+            bs-gnus--update-worker-avatar-cache-expiry))))
+
+(defun bs-gnus--update-worker-write-avatar (file data)
+  "Atomically write avatar DATA to cache FILE."
+  (make-directory bs-gnus--update-worker-avatar-cache-directory t)
+  (let ((temporary
+         (make-temp-file
+          (expand-file-name
+           ".avatar-"
+           bs-gnus--update-worker-avatar-cache-directory))))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert data)
+            (let ((coding-system-for-write 'binary))
+              (write-region (point-min) (point-max)
+                            temporary nil 'silent)))
+          (rename-file temporary file t)
+          (setq temporary nil))
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+(defun bs-gnus--update-worker-avatar (address)
+  "Return a cached Gravatar file for ADDRESS, retrieving it if needed."
+  (when (and (stringp address)
+             (not (string-empty-p address))
+             bs-gnus--update-worker-avatar-cache-directory)
+    (let* ((normalized (downcase (string-trim address)))
+           (file
+            (expand-file-name
+             (secure-hash 'sha256 normalized)
+             bs-gnus--update-worker-avatar-cache-directory)))
+      (if (bs-gnus--update-worker-avatar-current-p file)
+          file
+        (when (file-exists-p file)
+          (delete-file file))
+        (condition-case nil
+            (progn
+              (require 'gravatar)
+              (let* ((gravatar-default-image
+                      (or bs-gnus--update-worker-gravatar-default-image
+                          gravatar-default-image))
+                     (gravatar-size
+                      (or bs-gnus--update-worker-gravatar-size
+                          gravatar-size))
+                     (image
+                      (gravatar-retrieve-synchronously normalized))
+                     (data
+                      (and (not (eq image 'error))
+                           (plist-get (cdr image) :data))))
+                (when (stringp data)
+                  (bs-gnus--update-worker-write-avatar file data)
+                  file)))
+          (error nil))))))
+
+(defun bs-gnus--update-worker-add-avatars (records)
+  "Attach persistent Gravatar paths to notification RECORDS."
+  (mapcar
+   (lambda (record)
+     (plist-put
+      record :photo-file
+      (bs-gnus--update-worker-avatar
+       (plist-get record :address))))
+   records))
+
 (defun bs-gnus--update-worker-scan-groups (groups method)
   "Scan GROUPS through METHOD and return fetch plans."
   (let ((done 0)
@@ -730,13 +908,51 @@ After exhausting the list, continue using its final delay."
                          #'<))
                        (body-articles
                         (bs-gnus--update-worker-filter-active
-                         body-articles active)))
+                         body-articles active))
+                       (notification-articles
+                        (and (plist-get spec :notify)
+                             (sort
+                              (delete-dups
+                               (append
+                                (copy-sequence new-articles)
+                                (copy-sequence
+                                 (plist-get
+                                  spec :notification-articles))))
+                              #'<)))
+                       (notification-articles
+                        (bs-gnus--update-worker-filter-active
+                         notification-articles active))
+                       (live-overview
+                        (and notification-articles
+                             (bs-gnus--update-agent-file
+                              bs-gnus--update-worker-live-agent-directory
+                              method group ".overview")))
+                       (local-notifications
+                        (and live-overview
+                             (bs-gnus--update-worker-overview-records
+                              live-overview group
+                              notification-articles)))
+                       (local-articles
+                        (mapcar
+                         (lambda (record)
+                           (plist-get record :article))
+                         local-notifications))
+                       (header-articles
+                        (sort
+                         (delete-dups
+                          (append
+                           (copy-sequence body-articles)
+                           (seq-difference
+                            notification-articles local-articles #'=)))
+                         #'<)))
                   (push
                    (list :group group
                          :active active
                          :new-articles new-articles
-                         :header-articles body-articles
-                         :body-articles body-articles)
+                         :header-articles header-articles
+                         :body-articles body-articles
+                         :notification-articles notification-articles
+                         :local-notifications local-notifications)
                    plans))
               (let ((status
                      (string-trim
@@ -792,6 +1008,28 @@ pair containing the fetched body numbers and any errors."
              :done completed :total total)))
     (list fetched (nreverse errors) completed)))
 
+(defun bs-gnus--update-worker-notifications (plan method)
+  "Return notification records from PLAN after fetching through METHOD."
+  (let* ((group (plist-get plan :group))
+         (articles (plist-get plan :notification-articles))
+         (stage-overview
+          (and articles
+               (bs-gnus--update-agent-file
+                gnus-agent-directory method group ".overview")))
+         (staged
+          (and stage-overview
+               (bs-gnus--update-worker-overview-records
+                stage-overview group articles)))
+         (table (make-hash-table :test #'eql)))
+    (dolist (record (plist-get plan :local-notifications))
+      (puthash (plist-get record :article) record table))
+    (dolist (record staged)
+      (puthash (plist-get record :article) record table))
+    (bs-gnus--update-worker-add-avatars
+     (delq nil
+           (mapcar (lambda (article) (gethash article table))
+                   articles)))))
+
 (defun bs-gnus--update-worker-run (request)
   "Execute background update REQUEST and return its result."
   (unless (= (or (plist-get request :protocol) -1)
@@ -825,6 +1063,19 @@ pair containing the fetched body numbers and any errors."
           (plist-get request :credential))
          (bs-gnus--update-worker-auth-source-search-function
           (symbol-function 'auth-source-search))
+         (bs-gnus--update-worker-live-agent-directory
+          (file-name-as-directory
+           (plist-get request :live-agent-directory)))
+         (bs-gnus--update-worker-avatar-cache-directory
+          (and-let* ((directory
+                      (plist-get request :avatar-cache-directory)))
+            (file-name-as-directory directory)))
+         (bs-gnus--update-worker-avatar-cache-expiry
+          (plist-get request :avatar-cache-expiry))
+         (bs-gnus--update-worker-gravatar-default-image
+          (plist-get request :gravatar-default-image))
+         (bs-gnus--update-worker-gravatar-size
+          (plist-get request :gravatar-size))
          (gnus-newsrc-alist
           (cons
            (gnus-info-make "dummy.group" 0 nil)
@@ -866,7 +1117,10 @@ pair containing the fetched body numbers and any errors."
           (push
            (append
             plan
-            (list :fetched-bodies fetched))
+            (list :fetched-bodies fetched
+                  :notifications
+                  (bs-gnus--update-worker-notifications
+                   plan method)))
            results)))
       (list :protocol bs-gnus--update-protocol-version
             :source source
@@ -1036,6 +1290,18 @@ pair containing the fetched body numbers and any errors."
              (number-to-string article) group))))
      unread)))
 
+(defun bs-gnus--notifications-sent-articles (group)
+  "Return article numbers already notified for GROUP this session."
+  (and (boundp 'gnus-notifications-sent)
+       (cdr (assoc group gnus-notifications-sent))))
+
+(defun bs-gnus--notifications-candidates (group)
+  "Return unread GROUP articles not yet notified this session."
+  (seq-difference
+   (gnus-list-of-unread-articles group)
+   (bs-gnus--notifications-sent-articles group)
+   #'=))
+
 (defun bs-gnus--update-sources ()
   "Return background-update requests grouped by remote NNTP source."
   (let ((table (make-hash-table :test #'equal)))
@@ -1046,6 +1312,10 @@ pair containing the fetched body numbers and any errors."
           (when (eq (car method) 'nntp)
             (let* ((source (gnus-method-to-server method t))
                    (entry (gethash source table))
+                   (notify
+                    (and bs-gnus--notifications-enabled
+                         (<= (gnus-info-level info)
+                             gnus-notifications-minimum-level)))
                    (spec
                     (list :group group
                           :active (copy-tree
@@ -1053,7 +1323,12 @@ pair containing the fetched body numbers and any errors."
                                        '(0 . 0)))
                           :read (copy-tree (gnus-info-read info))
                           :missing-bodies
-                          (bs-gnus--update-missing-bodies group))))
+                          (bs-gnus--update-missing-bodies group)
+                          :notify notify
+                          :notification-articles
+                          (and notify
+                               (bs-gnus--notifications-candidates
+                                group)))))
               (if entry
                   (setf (plist-get entry :groups)
                         (nconc (plist-get entry :groups)
@@ -1309,6 +1584,18 @@ pair containing the fetched body numbers and any errors."
                 :method (plist-get entry :method)
                 :groups (plist-get entry :groups)
                 :stage stage
+                :live-agent-directory gnus-agent-directory
+                :avatar-cache-directory
+                (and bs-gnus--notifications-enabled
+                     gnus-notifications-use-gravatar
+                     bs-gnus-notifications-avatar-cache-directory)
+                :avatar-cache-expiry
+                bs-gnus-notifications-avatar-cache-expiry
+                :gravatar-default-image
+                (and (boundp 'gravatar-default-image)
+                     gravatar-default-image)
+                :gravatar-size
+                (and (boundp 'gravatar-size) gravatar-size)
                 :auth-sources auth-sources
                 :auth-source-pass-extra-query-keywords
                 (and (boundp 'auth-source-pass-extra-query-keywords)
@@ -1553,6 +1840,66 @@ requested header numbers.  Return the numbers actually available."
     (bs-gnus--update-refresh-summary
      group (plist-get plan :active) new-articles)))
 
+(defun bs-gnus--notifications-group-eligible-p (group)
+  "Return non-nil when GROUP remains eligible for notifications."
+  (when-let* ((info (gnus-get-info group)))
+    (<= (gnus-info-level info)
+        gnus-notifications-minimum-level)))
+
+(defun bs-gnus--notifications-article-unread-p (group article)
+  "Return non-nil when ARTICLE remains unread and active in GROUP."
+  (when-let* ((info (gnus-get-info group))
+              (active (gnus-active group)))
+    (and (<= (car active) article (cdr active))
+         (not (range-member-p article (gnus-info-read info))))))
+
+(defun bs-gnus--notifications-own-address-p (address)
+  "Return non-nil when ADDRESS matches `gnus-ignored-from-addresses'."
+  (and (boundp 'gnus-ignored-from-addresses)
+       gnus-ignored-from-addresses
+       (stringp address)
+       (not (string-empty-p address))
+       (condition-case nil
+           (if (functionp gnus-ignored-from-addresses)
+               (funcall gnus-ignored-from-addresses address)
+             (let ((regexp (gnus-ignored-from-addresses)))
+               (and regexp (string-match-p regexp address))))
+         (error nil))))
+
+(defun bs-gnus--notifications-mark-sent (group article id)
+  "Record ARTICLE in GROUP as notified under notification ID."
+  (let ((entry (assoc group gnus-notifications-sent)))
+    (unless entry
+      (setq entry (list group))
+      (push entry gnus-notifications-sent))
+    (cl-pushnew article (cdr entry) :test #'=))
+  (unless (eq id t)
+    (push (list id group article)
+          gnus-notifications-id-to-msg)))
+
+(defun bs-gnus--notifications-send (record)
+  "Notify the user about unread article RECORD if it remains eligible."
+  (when bs-gnus--notifications-enabled
+    (let ((group (plist-get record :group))
+          (article (plist-get record :article))
+          (address (plist-get record :address)))
+      (when (and (bs-gnus--notifications-group-eligible-p group)
+                 (bs-gnus--notifications-article-unread-p
+                  group article)
+                 (not (memq article
+                            (bs-gnus--notifications-sent-articles
+                             group)))
+                 (not (bs-gnus--notifications-own-address-p address)))
+        (when-let* ((id
+                     (gnus-notifications-notify
+                      (plist-get record :sender)
+                      (plist-get record :subject)
+                      (and-let* ((file
+                                  (plist-get record :photo-file)))
+                        (and (file-readable-p file) file)))))
+          (bs-gnus--notifications-mark-sent
+           group article id))))))
+
 (defun bs-gnus--update-group-identity-at (buffer position)
   "Return the Group or Topic identity at POSITION in BUFFER."
   (with-current-buffer buffer
@@ -1644,6 +1991,8 @@ requested header numbers.  Return the numbers actually available."
     (`(finish-group ,source ,method ,stage ,plan)
      (bs-gnus--update-finish-group
       source method stage plan))
+    (`(notification ,_source ,record)
+     (bs-gnus--notifications-send record))
     (`(finish-source ,source ,stage ,errors)
      (bs-gnus--update-finish-source
       source stage errors))))
@@ -1686,6 +2035,7 @@ requested header numbers.  Return the numbers actually available."
   (let ((source (plist-get result :source))
         (method (plist-get result :method))
         (stage (plist-get result :stage))
+        notification-records
         operations)
     (dolist (original-plan (plist-get result :groups))
       (let ((plan
@@ -1697,7 +2047,31 @@ requested header numbers.  Return the numbers actually available."
                       (plist-get plan :group) article)
                 operations))
         (push (list 'finish-group source method stage plan)
-              operations)))
+              operations)
+        (setq notification-records
+              (nconc notification-records
+                     (copy-sequence
+                      (plist-get plan :notifications))))))
+    (dolist (record
+             (sort notification-records
+                   (lambda (left right)
+                     (let ((left-time
+                            (plist-get left :timestamp))
+                           (right-time
+                            (plist-get right :timestamp)))
+                       (if (= left-time right-time)
+                           (let ((left-group
+                                  (plist-get left :group))
+                                 (right-group
+                                  (plist-get right :group)))
+                             (if (equal left-group right-group)
+                                 (< (plist-get left :article)
+                                    (plist-get right :article))
+                               (string-lessp left-group
+                                             right-group)))
+                         (< left-time right-time))))))
+      (push (list 'notification source record)
+            operations))
     (push (list 'finish-source source stage
                 (plist-get result :errors))
           operations)
@@ -1797,6 +2171,19 @@ requested header numbers.  Return the numbers actually available."
                        bs-gnus--update-apply-errors))
     (clrhash table))
   (bs-gnus--update-force-header))
+
+;;;###autoload
+(defun bs-gnus-notifications-enable ()
+  "Deliver configured Gnus notifications from background updates."
+  (interactive)
+  (require 'gnus-notifications)
+  (setq bs-gnus--notifications-enabled t))
+
+;;;###autoload
+(defun bs-gnus-notifications-disable ()
+  "Disable notifications without clearing this session's sent state."
+  (interactive)
+  (setq bs-gnus--notifications-enabled nil))
 
 ;;;###autoload
 (defun bs-gnus-update-enable ()
