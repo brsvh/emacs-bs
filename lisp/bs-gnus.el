@@ -3308,7 +3308,7 @@ FIRST-P says that this is the first month in the Summary buffer."
   (let* ((prefix
           (concat
            (make-string bs-gnus--summary-prefix-width ?\s)
-           "… "))
+           "…  "))
          (date (bs-gnus--summary-date header))
          (name
           (bs-gnus--summary-contact-name
