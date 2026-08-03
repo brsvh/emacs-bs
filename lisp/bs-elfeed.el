@@ -279,6 +279,14 @@ interpreted as an image file.  Nil requests no application icon."
   :type 'number
   :group 'bs-elfeed)
 
+(defcustom bs-elfeed-notifications-timeout nil
+  "Milliseconds before an Elfeed notification closes automatically.
+Nil uses the notification server default.  Zero means never close
+automatically."
+  :type '(choice (const :tag "Server default" nil)
+                 (integer :tag "Milliseconds"))
+  :group 'bs-elfeed)
+
 (defcustom bs-elfeed-notifications-read-display-function
   #'bs-call-in-new-frame
   "Function used to display Elfeed notification Read actions.
@@ -847,7 +855,8 @@ REASON is ignored."
                       :app-icon bs-elfeed-notifications-app-icon
                       :image-path favicon-file
                       :app-name "Elfeed"
-                      :category "news")))
+                      :category "news"
+                      :timeout bs-elfeed-notifications-timeout)))
           (puthash entry-id t
                    bs-elfeed--notifications-sent-entry-ids)
           (setq bs-elfeed--notifications-id-to-entry-id

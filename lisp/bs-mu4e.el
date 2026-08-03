@@ -1228,6 +1228,14 @@ interpreted as an image file.  Nil requests no application icon."
   :type 'natnum
   :group 'bs-mu4e)
 
+(defcustom bs-mu4e-notifications-timeout nil
+  "Milliseconds before a Mu4e notification closes automatically.
+Nil uses the notification server default.  Zero means never close
+automatically."
+  :type '(choice (const :tag "Server default" nil)
+                 (integer :tag "Milliseconds"))
+  :group 'bs-mu4e)
+
 (defcustom bs-mu4e-notifications-read-display-function
   #'bs-call-in-new-frame
   "Function used to display Mu4e notification Read actions.
@@ -1588,7 +1596,8 @@ REASON is ignored."
                   :app-icon bs-mu4e-notifications-app-icon
                   :image-path avatar-file
                   :app-name "mu4e"
-                  :category "email.arrived")))
+                  :category "email.arrived"
+                  :timeout bs-mu4e-notifications-timeout)))
       (setq bs-mu4e--notifications-id-to-message-id
             (cons (cons id (plist-get mail :message-id))
                   (assq-delete-all

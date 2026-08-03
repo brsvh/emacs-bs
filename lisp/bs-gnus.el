@@ -118,6 +118,8 @@
 (declare-function gnus-status-message "gnus" (command-method))
 (declare-function gnus-summary-insert-articles
                   "gnus-sum" (articles))
+(declare-function gnus-summary-goto-article
+                  "gnus-sum" (article &optional all-headers force))
 (declare-function gnus-ignored-from-addresses "gnus-sum" ())
 (declare-function gnus-notifications-notify
                   "gnus-notifications"
@@ -1909,15 +1911,28 @@ requested header numbers.  Return the numbers actually available."
           (bs-gnus--notifications-mark-sent
            group article id))))))
 
+(defun bs-gnus--notifications-read-and-position
+    (function id key group article)
+  "Call FUNCTION with ID and KEY, then focus ARTICLE from GROUP."
+  (funcall function id key)
+  (when (and (derived-mode-p 'gnus-summary-mode)
+             (equal gnus-newsgroup-name group))
+    (gnus-summary-goto-article article nil t)
+    (when-let* ((window
+                 (get-buffer-window gnus-article-buffer)))
+      (select-window window))))
+
 (defun bs-gnus--notifications-action-with-display-function
     (function id key)
   "Call notification action FUNCTION with ID and KEY.
 Open mapped Read actions using the configured display function."
-  (if (and (member key '("default" "read"))
-           (assoc id gnus-notifications-id-to-msg))
-      (funcall
-       bs-gnus-notifications-read-display-function function id key)
-    (funcall function id key)))
+  (let ((message (assoc id gnus-notifications-id-to-msg)))
+    (if (and (member key '("default" "read")) message)
+        (funcall
+         bs-gnus-notifications-read-display-function
+         #'bs-gnus--notifications-read-and-position
+         function id key (nth 1 message) (nth 2 message))
+      (funcall function id key))))
 
 (defun bs-gnus--update-group-identity-at (buffer position)
   "Return the Group or Topic identity at POSITION in BUFFER."
