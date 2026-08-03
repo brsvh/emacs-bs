@@ -117,6 +117,7 @@
 (defvar mu4e-headers-open-after-move)
 (defvar mu4e-headers-precise-alignment)
 (defvar mu4e-headers-time-format)
+(defvar mu4e-headers-visible-flags)
 (defvar mu4e-index-update-error-continue)
 (defvar mu4e-main-buffer-name)
 (defvar mu4e-mu-version)
@@ -977,6 +978,82 @@ With EDIT, offer to edit the generated query first."
   "Face for correspondents of unread messages."
   :group 'bs-mu4e)
 
+(defface bs-mu4e-headers-header-face
+  '((t :inherit header-line :height 1.0))
+  "Base face used for the complete Mu4e Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-label-face
+  '((t :inherit header-line :weight bold))
+  "Face used for labels in the Mu4e Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-query-face
+  '((t :inherit font-lock-keyword-face :weight bold :slant italic))
+  "Face used for the query in the Mu4e Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-context-face
+  '((t :inherit font-lock-keyword-face))
+  "Face used for the context in the Mu4e Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-unread-face
+  '((t :inherit error :weight semibold))
+  "Face used for nonzero unread counts in the Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-shown-face
+  '((t :inherit success))
+  "Face used for shown-message counts in the Headers header line."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-header-muted-face
+  '((t :inherit shadow :weight normal :slant normal))
+  "Face used for secondary Mu4e Headers statistics."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-month-face
+  '((t :inherit font-lock-keyword-face
+       :height 1.10 :underline nil :extend t))
+  "Face used for root-message month separators in Headers buffers."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-unread-flag-face
+  '((t :inherit error :weight bold))
+  "Face used for new and unread Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-attention-flag-face
+  '((t :inherit warning :weight bold))
+  "Face used for flagged and draft Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-activity-flag-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face used for reply and forwarding Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-metadata-flag-face
+  '((t :inherit font-lock-keyword-face :weight normal))
+  "Face used for attachment and calendar Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-secure-flag-face
+  '((t :inherit success :weight normal))
+  "Face used for signed and encrypted Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-negative-flag-face
+  '((t :inherit error :weight bold))
+  "Face used for trashed Mu4e flags."
+  :group 'bs-mu4e)
+
+(defface bs-mu4e-headers-quiet-flag-face
+  '((t :inherit shadow))
+  "Face used for secondary Mu4e flags."
+  :group 'bs-mu4e)
+
 (defface bs-mu4e-headers-label-face
   '((t :inherit mu4e-header-face :weight regular :underline nil))
   "Parent face for labels in thread listings."
@@ -1023,6 +1100,21 @@ With EDIT, offer to edit the generated query first."
 
 (defcustom bs-mu4e-headers-thread-count-padding 0.5
   "Colored padding beside thread message counts, in character widths."
+  :type 'number
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-month-format "%b %Y"
+  "Format used for root-message month separators in Headers buffers."
+  :type 'string
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-month-line-spacing 0.65
+  "Relative spacing added above and below Headers month separators."
+  :type 'number
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-headers-header-bottom-spacing 0.5
+  "Relative line height reserved below the Mu4e Headers header."
   :type 'number
   :group 'bs-mu4e)
 
@@ -1662,9 +1754,6 @@ delegates all other fields to FUNCTION."
 (defvar-local bs-mu4e--headers-search-complete nil
   "Non-nil after mu4e reports that the current search is complete.")
 
-(defvar-local bs-mu4e--headers-summary-end nil
-  "Marker after the query summary.")
-
 (defvar-local bs-mu4e--headers-threads nil
   "Ordered thread plists for the current headers search.")
 
@@ -1902,15 +1991,40 @@ its subject to CONTENT-COLUMN."
        'bs-mu4e-headers-title-face line)
       line)))
 
+(defun bs-mu4e--headers-flag-face (flag)
+  "Return the semantic face for Mu4e FLAG."
+  (pcase flag
+    ((or 'new 'unread) 'bs-mu4e-headers-unread-flag-face)
+    ((or 'flagged 'draft) 'bs-mu4e-headers-attention-flag-face)
+    ((or 'passed 'replied) 'bs-mu4e-headers-activity-flag-face)
+    ((or 'attach 'calendar) 'bs-mu4e-headers-metadata-flag-face)
+    ((or 'encrypted 'signed) 'bs-mu4e-headers-secure-flag-face)
+    ('trashed 'bs-mu4e-headers-negative-flag-face)
+    (_ 'bs-mu4e-headers-quiet-flag-face)))
+
+(defun bs-mu4e--headers-flags (msg width)
+  "Return individually highlighted flags for MSG fitted to WIDTH."
+  (let ((flags (mu4e-message-field msg :flags)))
+    (bs-mu4e--headers-fit
+     (mapconcat
+      (lambda (flag)
+        (if (memq flag mu4e-headers-visible-flags)
+            (propertize
+             (mu4e~headers-flags-str (list flag))
+             'font-lock-face (bs-mu4e--headers-flag-face flag))
+          ""))
+      flags "")
+     width)))
+
 (defun bs-mu4e--headers-message-line
     (msg prefix width content-column)
   "Return a rendered message line for MSG with PREFIX at WIDTH.
 
 Align PREFIX to CONTENT-COLUMN without changing the flags field."
-  (let* ((flags (mu4e~headers-field-value msg :flags))
+  (let* ((native-flags (mu4e~headers-field-value msg :flags))
          (flags-width (bs-mu4e--headers-field-width
-                       :flags (string-width flags)))
-         (flags (bs-mu4e--headers-fit flags flags-width))
+                       :flags (string-width native-flags)))
+         (flags (bs-mu4e--headers-flags msg flags-width))
          (prefix-padding
           (bs-mu4e--headers-space
            (max 0
@@ -1988,14 +2102,105 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
        list-buffers-directory
      "")))
 
-(defun bs-mu4e--headers-summary-line ()
-  "Return the query summary for the current headers search."
-  (propertize
-   (format "SEARCH (%d%s): %S\n\n"
-           bs-mu4e--headers-match-count
-           (if bs-mu4e--headers-search-complete "" "+")
-           (bs-mu4e--headers-query))
-   'font-lock-face 'mu4e-header-key-face))
+(defun bs-mu4e--headers-message-count ()
+  "Return the number of messages in the current Headers model."
+  (cl-loop for thread in bs-mu4e--headers-threads
+           sum (length (plist-get thread :messages))))
+
+(defun bs-mu4e--headers-unread-count ()
+  "Return the number of unread messages in the Headers model."
+  (cl-loop for thread in bs-mu4e--headers-threads
+           sum (bs-mu4e--headers-thread-unread-count thread)))
+
+(defun bs-mu4e--headers-context-total (fallback)
+  "Return the active context total, or FALLBACK when unavailable."
+  (or (when-let* ((summary
+                   (bs-mu4e--main-summary
+                    (bs-mu4e--main-query-items))))
+        (plist-get summary :count))
+      fallback))
+
+(defun bs-mu4e--headers-statistics ()
+  "Return right-side statistics for the Headers header line."
+  (let* ((shown (bs-mu4e--headers-message-count))
+         (unread (bs-mu4e--headers-unread-count))
+         (total (bs-mu4e--headers-context-total shown))
+         (separator
+          (propertize " · " 'face 'bs-mu4e-headers-header-muted-face)))
+    (concat
+     (propertize
+      (bs-mu4e--headers-sanitize-string bs-mu4e-context-name)
+      'face 'bs-mu4e-headers-header-context-face)
+     separator
+     (propertize
+      (number-to-string unread)
+      'face (if (> unread 0)
+                'bs-mu4e-headers-header-unread-face
+              'bs-mu4e-headers-header-muted-face))
+     (propertize " unread" 'face 'bs-mu4e-headers-header-muted-face)
+     separator
+     (propertize
+      (number-to-string shown) 'face 'bs-mu4e-headers-header-shown-face)
+     (propertize " shown" 'face 'bs-mu4e-headers-header-muted-face)
+     separator
+     (propertize
+      (format "%d total" total)
+      'face 'bs-mu4e-headers-header-muted-face))))
+
+(defun bs-mu4e--headers-header ()
+  "Return the Headers query with right-aligned statistics."
+  (let* ((width (bs-mu4e--headers-width))
+         (statistics (bs-mu4e--headers-statistics))
+         (identity
+          (concat
+           (propertize "SEARCH " 'face 'bs-mu4e-headers-header-label-face)
+           (propertize
+            (bs-mu4e--headers-query)
+            'face 'bs-mu4e-headers-header-query-face)))
+         (identity
+          (bs-mu4e--headers-truncate
+           identity
+           (max 0 (- width (string-width statistics) 2))))
+         (header
+          (concat
+           identity
+           (bs-mu4e--main-header-right-padding statistics)
+           statistics)))
+    (add-face-text-property
+     0 (length header) 'bs-mu4e-headers-header-face t header)
+    header))
+
+(defun bs-mu4e--headers-thread-month (thread)
+  "Return the root message month key and title for THREAD."
+  (let ((date
+         (mu4e-message-field
+          (car (plist-get thread :messages)) :date)))
+    (condition-case nil
+        (if (equal date '(0 0 0))
+            '("undated" . "Undated")
+          (cons (format-time-string "%Y-%m" date)
+                (format-time-string bs-mu4e-headers-month-format date)))
+      (error '("undated" . "Undated")))))
+
+(defun bs-mu4e--headers-month-line (title first-p)
+  "Return a month separator for TITLE.
+FIRST-P says that this is the first month in the Headers buffer."
+  (let* ((top-spacing
+          (+ bs-mu4e-headers-month-line-spacing
+             (if first-p bs-mu4e-headers-header-bottom-spacing 0)))
+         (line (concat "  " title "\n"))
+         (newline (1- (length line))))
+    (add-text-properties
+     0 (length line) '(face bs-mu4e-headers-month-face) line)
+    (add-text-properties
+     0 1
+     `(line-prefix ,(bs-mu4e--main-top-spacing-prefix top-spacing))
+     line)
+    (add-text-properties
+     newline (length line)
+     `(line-spacing ,bs-mu4e-headers-month-line-spacing)
+     line)
+    line))
 
 (defun bs-mu4e--headers-clear-thread-markers ()
   "Detach all region markers owned by the current thread model."
@@ -2004,14 +2209,6 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
       (set-marker marker nil))
     (when-let* ((marker (plist-get thread :end)))
       (set-marker marker nil))))
-
-(defun bs-mu4e--headers-insert-summary ()
-  "Insert the query summary at point and update its end marker."
-  (insert (bs-mu4e--headers-summary-line))
-  (unless (markerp bs-mu4e--headers-summary-end)
-    (setq bs-mu4e--headers-summary-end (make-marker))
-    (set-marker-insertion-type bs-mu4e--headers-summary-end nil))
-  (set-marker bs-mu4e--headers-summary-end (point) (current-buffer)))
 
 (defun bs-mu4e--headers-message-level (msg)
   "Return the thread nesting level of MSG."
@@ -2170,23 +2367,21 @@ Right-align its message-count label to COUNT-WIDTH columns."
       (remove-overlays)
       (erase-buffer)
       (goto-char (point-min))
-      (bs-mu4e--headers-insert-summary)
-      (dolist (thread bs-mu4e--headers-threads)
-        (bs-mu4e--headers-insert-thread thread width count-width))
+      (let ((previous-month nil)
+            (first-month-p t))
+        (dolist (thread bs-mu4e--headers-threads)
+          (pcase-let ((`(,month . ,title)
+                       (bs-mu4e--headers-thread-month thread)))
+            (unless (equal month previous-month)
+              (insert (bs-mu4e--headers-month-line title first-month-p))
+              (setq previous-month month
+                    first-month-p nil)))
+          (bs-mu4e--headers-insert-thread thread width count-width)))
       (setq bs-mu4e--headers-render-width width
-            header-line-format nil)
+            header-line-format '(:eval (bs-mu4e--headers-header)))
       (bs-mu4e--headers-restore-marks)
-      (bs-mu4e--headers-restore-selection docid))))
-
-(defun bs-mu4e--headers-rerender-summary ()
-  "Rerender only the query summary."
-  (when (and (markerp bs-mu4e--headers-summary-end)
-             (marker-position bs-mu4e--headers-summary-end))
-    (let ((inhibit-read-only t))
-      (delete-region (point-min)
-                     (marker-position bs-mu4e--headers-summary-end))
-      (goto-char (point-min))
-      (bs-mu4e--headers-insert-summary))))
+      (bs-mu4e--headers-restore-selection docid)
+      (force-mode-line-update))))
 
 (defun bs-mu4e--headers-rerender-thread (thread &optional preferred-docid)
   "Rerender THREAD while preserving PREFERRED-DOCID."
@@ -2252,9 +2447,8 @@ Right-align its message-count label to COUNT-WIDTH columns."
           bs-mu4e--headers-initialized t
           bs-mu4e--headers-match-count 0
           bs-mu4e--headers-search-complete nil
-          bs-mu4e--headers-summary-end nil
           bs-mu4e--headers-threads nil
-          header-line-format nil)
+          header-line-format '(:eval (bs-mu4e--headers-header)))
     (bs-mu4e--headers-render)))
 
 (defun bs-mu4e--headers-clear-advice (function &optional text)
@@ -2311,7 +2505,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
         (setq mu4e--search-msgid-target nil))
       (when-let* ((docid (mu4e~headers-docid-at-point)))
         (mu4e~headers-highlight docid))
-      (setq header-line-format nil)
+      (setq header-line-format '(:eval (bs-mu4e--headers-header)))
       (when (fboundp 'mu4e--modeline-update)
         (mu4e--modeline-update))))
   (run-hooks 'mu4e-headers-found-hook))
@@ -2362,14 +2556,10 @@ also refreshes a view buffer showing MSG."
                   (unless was-related
                     (setq bs-mu4e--headers-match-count
                           (max 0 (1- bs-mu4e--headers-match-count))))
-                  (if (plist-get thread :messages)
-                      (bs-mu4e--headers-rerender-thread thread)
-                    (let ((inhibit-read-only t))
-                      (delete-region
-                       (marker-position (plist-get thread :start))
-                       (marker-position (plist-get thread :end)))
-                      (setq bs-mu4e--headers-threads
-                            (delq thread bs-mu4e--headers-threads)))))
+                  (unless (plist-get thread :messages)
+                    (setq bs-mu4e--headers-threads
+                          (delq thread bs-mu4e--headers-threads)))
+                  (bs-mu4e--headers-render))
               (setf (plist-get thread :messages)
                     (mapcar (lambda (item)
                               (if (eq item old-msg) msg item))
@@ -2377,8 +2567,6 @@ also refreshes a view buffer showing MSG."
               (when markinfo
                 (puthash docid markinfo mu4e--mark-map))
               (bs-mu4e--headers-rerender-thread thread docid))
-            (when is-move
-              (bs-mu4e--headers-rerender-summary))
             (run-hooks 'mu4e-message-changed-hook))))))
 
 (defun bs-mu4e--headers-remove-handler (docid)
@@ -2394,16 +2582,10 @@ also refreshes a view buffer showing MSG."
           (setq bs-mu4e--headers-match-count
                 (max 0 (1- bs-mu4e--headers-match-count))))
         (remhash docid mu4e--mark-map)
-        (if (plist-get thread :messages)
-            (bs-mu4e--headers-rerender-thread thread)
-          (let ((inhibit-read-only t))
-            (delete-region
-             (marker-position (plist-get thread :start))
-             (marker-position (plist-get thread :end)))
-            (setq bs-mu4e--headers-threads
-                  (delq thread bs-mu4e--headers-threads))))
-        (bs-mu4e--headers-rerender-summary)
-        (bs-mu4e--headers-restore-selection nil))))
+        (unless (plist-get thread :messages)
+          (setq bs-mu4e--headers-threads
+                (delq thread bs-mu4e--headers-threads)))
+        (bs-mu4e--headers-render))))
   (when-let* ((view-buffer (mu4e-get-view-buffer)))
     (when (and (buffer-live-p view-buffer)
                (with-current-buffer view-buffer
