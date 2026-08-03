@@ -290,6 +290,11 @@ entries."
   :type 'string
   :group 'bs-elfeed)
 
+(defcustom bs-elfeed-search-month-format "%Y %b"
+  "Format used for month separators in Elfeed Search."
+  :type 'string
+  :group 'bs-elfeed)
+
 (defcustom bs-elfeed-search-score-limit 999
   "Largest score displayed without compact unit notation."
   :type 'natnum
@@ -1257,6 +1262,25 @@ FIRST-P says that this is the first separator in the buffer."
       'bs-elfeed-search-month-separator t
       'line-spacing bs-elfeed-search-month-line-spacing))))
 
+(defun bs-elfeed--search-dates-ordered-p ()
+  "Return non-nil when displayed Search entries are time ordered."
+  (let ((ascending (eq elfeed-search-sort-order 'ascending))
+        previous
+        (ordered-p t))
+    (save-excursion
+      (goto-char (point-min))
+      (while (and ordered-p (not (eobp)))
+        (when-let* ((entry (get-text-property (point) 'elfeed-entry))
+                    (date (elfeed-entry-date entry)))
+          (when (and previous
+                     (if ascending
+                         (> previous date)
+                       (< previous date)))
+            (setq ordered-p nil))
+          (setq previous date))
+        (forward-line 1)))
+    ordered-p))
+
 (defun bs-elfeed--search-add-separators ()
   "Add styled month separators to the current Elfeed Search buffer."
   (let ((last nil)
@@ -1264,20 +1288,24 @@ FIRST-P says that this is the first separator in the buffer."
         (count 0))
     (remove-overlays
      (point-min) (point-max) 'category 'elfeed-search-separator)
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (when-let* ((entry (get-text-property (point) 'elfeed-entry))
-                    (title (elfeed-search--separator-title entry))
-                    ((not (equal title last))))
-          (cl-incf count)
-          (setq overlay (make-overlay (line-beginning-position)
-                                      (line-beginning-position)))
-          (overlay-put overlay 'category 'elfeed-search-separator)
-          (overlay-put overlay 'before-string
-                       (bs-elfeed--search-month-string title (null last)))
-          (setq last title))
-        (forward-line 1)))
+    (when (bs-elfeed--search-dates-ordered-p)
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when-let* ((entry (get-text-property (point) 'elfeed-entry))
+                      (title
+                       (format-time-string
+                        bs-elfeed-search-month-format
+                        (seconds-to-time (elfeed-entry-date entry))))
+                      ((not (equal title last))))
+            (cl-incf count)
+            (setq overlay (make-overlay (line-beginning-position)
+                                        (line-beginning-position)))
+            (overlay-put overlay 'category 'elfeed-search-separator)
+            (overlay-put overlay 'before-string
+                         (bs-elfeed--search-month-string title (null last)))
+            (setq last title))
+          (forward-line 1))))
     (if (= count 1)
         (progn
           (delete-overlay overlay)

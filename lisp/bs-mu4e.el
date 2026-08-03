@@ -1103,7 +1103,7 @@ With EDIT, offer to edit the generated query first."
   :type 'number
   :group 'bs-mu4e)
 
-(defcustom bs-mu4e-headers-month-format "%b %Y"
+(defcustom bs-mu4e-headers-month-format "%Y %b"
   "Format used for root-message month separators in Headers buffers."
   :type 'string
   :group 'bs-mu4e)
@@ -2182,6 +2182,31 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
                 (format-time-string bs-mu4e-headers-month-format date)))
       (error '("undated" . "Undated")))))
 
+(defun bs-mu4e--headers-thread-date (thread)
+  "Return THREAD's root-message date, or nil when it is invalid."
+  (condition-case nil
+      (let ((date
+             (mu4e-message-field
+              (car (plist-get thread :messages)) :date)))
+        (unless (equal date '(0 0 0))
+          date))
+    (error nil)))
+
+(defun bs-mu4e--headers-thread-newer-p (left right)
+  "Return non-nil when LEFT's root message is newer than RIGHT's."
+  (let ((left-date (bs-mu4e--headers-thread-date left))
+        (right-date (bs-mu4e--headers-thread-date right)))
+    (cond
+     ((null left-date) nil)
+     ((null right-date) t)
+     (t (time-less-p right-date left-date)))))
+
+(defun bs-mu4e--headers-sort-threads ()
+  "Stably sort the headers model by descending root-message date."
+  (setq bs-mu4e--headers-threads
+        (cl-stable-sort bs-mu4e--headers-threads
+                        #'bs-mu4e--headers-thread-newer-p)))
+
 (defun bs-mu4e--headers-month-line (title first-p)
   "Return a month separator for TITLE.
 FIRST-P says that this is the first month in the Headers buffer."
@@ -2356,6 +2381,7 @@ Right-align its message-count label to COUNT-WIDTH columns."
 (defun bs-mu4e--headers-render (&optional preferred-docid)
   "Render the full headers model, preserving PREFERRED-DOCID."
   (when bs-mu4e--headers-initialized
+    (bs-mu4e--headers-sort-threads)
     (let ((docid (or preferred-docid
                      (mu4e~headers-docid-at-point)))
           (width (bs-mu4e--headers-width))

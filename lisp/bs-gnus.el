@@ -396,7 +396,7 @@
   :type 'string
   :group 'bs-gnus)
 
-(defcustom bs-gnus-summary-month-format "%b %Y"
+(defcustom bs-gnus-summary-month-format "%Y %b"
   "Format used for root-article month separators in Summary buffers."
   :type 'string
   :group 'bs-gnus)
@@ -2697,15 +2697,31 @@ of THREAD."
       (push (nreverse current) threads))
     (nreverse threads)))
 
-(defun bs-gnus--summary-root-month (thread)
-  "Return the formatted month of THREAD's root article."
+(defun bs-gnus--summary-root-date (thread)
+  "Return THREAD's root-article date, or nil when it is invalid."
   (condition-case nil
-      (format-time-string
-       bs-gnus-summary-month-format
-       (date-to-time
-        (mail-header-date
-         (gnus-data-header (car thread)))))
+      (date-to-time
+       (mail-header-date
+        (gnus-data-header (car thread))))
     (error nil)))
+
+(defun bs-gnus--summary-root-month (thread)
+  "Return the month key and title of THREAD's root article."
+  (when-let* ((date (bs-gnus--summary-root-date thread)))
+    (cons (format-time-string "%Y-%m" date)
+          (format-time-string bs-gnus-summary-month-format date))))
+
+(defun bs-gnus--summary-threads-ordered-p (threads)
+  "Return non-nil when THREADS have descending root-article dates."
+  (let (previous
+        (ordered-p t))
+    (while (and ordered-p threads)
+      (when-let* ((date (bs-gnus--summary-root-date (car threads))))
+        (when (and previous (time-less-p previous date))
+          (setq ordered-p nil))
+        (setq previous date))
+      (setq threads (cdr threads)))
+    ordered-p))
 
 (defun bs-gnus--summary-month-data (threads)
   "Return month boundaries and preceding breaks for THREADS.
@@ -2720,13 +2736,15 @@ which the ordinary thread separator should be omitted."
     (dolist (thread threads)
       (let* ((root (car thread))
              (article (gnus-data-number root))
-             (month (bs-gnus--summary-root-month thread)))
-        (when (and month (not (equal month last-month)))
-          (puthash article (cons month first-p) boundaries)
+             (month (bs-gnus--summary-root-month thread))
+             (key (car-safe month))
+             (title (cdr-safe month)))
+        (when (and key (not (equal key last-month)))
+          (puthash article (cons title first-p) boundaries)
           (when previous
             (puthash previous t breaks))
           (setq first-p nil
-                last-month month))
+                last-month key))
         (setq previous article)))
     (cons boundaries breaks)))
 
@@ -3233,7 +3251,8 @@ FIRST-P says that this is the first month in the Summary buffer."
         (let* ((count-width
                 (bs-gnus--summary-thread-count-width threads))
                (month-data
-                (bs-gnus--summary-month-data threads))
+                (when (bs-gnus--summary-threads-ordered-p threads)
+                  (bs-gnus--summary-month-data threads)))
                (month-boundaries (car month-data))
                (month-breaks (cdr month-data)))
           (dolist (thread (reverse threads))
