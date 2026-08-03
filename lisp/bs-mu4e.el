@@ -36,10 +36,18 @@
 (declare-function message-tab "message" ())
 (declare-function bs-contacts-mail-completion-set "bs-contacts"
                   (&optional mu4e-contacts-set))
+(declare-function gravatar-retrieve
+                  "gravatar" (mail-address callback &optional cbargs))
+(declare-function notifications-close-notification
+                  "notifications" (id &optional bus))
+(declare-function notifications-notify "notifications" (&rest params))
 (declare-function mu4e--modeline-update "mu4e-modeline" ())
 (declare-function mu4e--main-queue-size "mu4e-main" ())
 (declare-function mu4e--main-redraw "mu4e-main" ())
 (declare-function mu4e--main-toggle-mail-sending-mode "mu4e-main" ())
+(declare-function mu4e--server-move
+                  "mu4e-server"
+                  (docid-or-msgid &optional maildir flags no-view))
 (declare-function mu4e-main-mode "mu4e-main" ())
 (declare-function mu4e--compose-complete-handler "mu4e-compose" (str pred action))
 (declare-function mu4e-ask-maildir "mu4e-folders" (prompt))
@@ -65,11 +73,16 @@
                   "mu4e-message" (&optional msg))
 (declare-function mu4e-search-rerun "mu4e-search" ())
 (declare-function mu4e-query-items "mu4e-query-items" (&optional type refresh))
-(declare-function mu4e-search "mu4e-search" (&optional expr prompt edit))
+(declare-function mu4e-search
+                  "mu4e-search"
+                  (&optional expr prompt edit ignore-history msgid show))
 (declare-function mu4e-search-maildir "mu4e-search" (maildir &optional edit))
 (declare-function mu4e-search-query "mu4e-search" ())
 (declare-function mu4e-search-read-query "mu4e-search" (prompt &optional initial))
 (declare-function mu4e-update-mail-and-index "mu4e-update" (run-in-background))
+(declare-function mu4e-alert-notify-unread-messages
+                  "mu4e-alert" (mails))
+(declare-function mu4e-alert-set-window-urgency-maybe "mu4e-alert" ())
 (declare-function smtpmail-send-queued-mail "smtpmail" ())
 (declare-function mu4e--view-html-displayed-p "mu4e-view" ())
 (declare-function mu4e--view-render-buffer "mu4e-view" (msg))
@@ -1193,6 +1206,41 @@ The first matching regexp is reported by
   :type '(repeat regexp)
   :group 'bs-mu4e)
 
+(defcustom bs-mu4e-notifications-app-icon 'mail-unread
+  "Fallback application icon used for Mu4e notifications.
+
+A symbol names an icon from the desktop icon theme.  A string is
+interpreted as an image file.  Nil requests no application icon."
+  :type '(choice (const :tag "No application icon" nil)
+                 (symbol :tag "Desktop icon name")
+                 (file :tag "Image file"))
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-notifications-avatar-cache-directory
+  (locate-user-emacs-file "cache/mu4e/notification-avatars/")
+  "Directory containing persistent Mu4e notification avatars."
+  :type 'directory
+  :group 'bs-mu4e)
+
+(defcustom bs-mu4e-notifications-avatar-cache-expiry
+  (* 90 24 60 60)
+  "Seconds before a cached Mu4e notification avatar expires."
+  :type 'natnum
+  :group 'bs-mu4e)
+
+(defvar bs-mu4e--notifications-avatar-generation 0
+  "Generation identifying relevant asynchronous avatar callbacks.")
+
+(defvar bs-mu4e--notifications-avatar-waiters
+  (make-hash-table :test #'equal)
+  "Messages waiting for each normalized sender avatar address.")
+
+(defvar bs-mu4e--notifications-enabled nil
+  "Non-nil when Mu4e Alert delivery is handled by bs-mu4e.")
+
+(defvar bs-mu4e--notifications-id-to-message-id nil
+  "Alist mapping desktop notification identifiers to message IDs.")
+
 (defvar bs-mu4e--view-xwidget-enabled nil
   "Non-nil when displayed Mu4e HTML opens automatically in Xwidget.")
 
@@ -1411,6 +1459,211 @@ Use cleaned contact candidates for the duration of the call."
     (bs-mu4e-add-around-advice
      'mu4e--compose-complete-handler
      #'bs-mu4e-mu4e-compose-complete-handler)))
+
+(defun bs-mu4e--notifications-avatar-address (mail)
+  "Return MAIL's normalized sender address for avatar lookup."
+  (when-let* ((contact (car (plist-get mail :from)))
+              (address (mu4e-contact-email contact))
+              ((stringp address))
+              (address (downcase (string-trim address)))
+              ((not (string-empty-p address))))
+    address))
+
+(defun bs-mu4e--notifications-avatar-file (address)
+  "Return the persistent avatar file for normalized ADDRESS."
+  (expand-file-name
+   (secure-hash 'sha256 address)
+   bs-mu4e-notifications-avatar-cache-directory))
+
+(defun bs-mu4e--notifications-avatar-current-p (file)
+  "Return non-nil when cached avatar FILE is present and current."
+  (when-let* ((attributes (file-attributes file)))
+    (and (> (file-attribute-size attributes) 0)
+         (< (float-time
+             (time-subtract
+              (current-time)
+              (file-attribute-modification-time attributes)))
+            bs-mu4e-notifications-avatar-cache-expiry))))
+
+(defun bs-mu4e--notifications-write-avatar (file image)
+  "Atomically write IMAGE data to avatar cache FILE.
+Return FILE on success, or nil when IMAGE has no embedded data."
+  (when-let* ((data (and (consp image)
+                         (plist-get (cdr image) :data))))
+    (make-directory bs-mu4e-notifications-avatar-cache-directory t)
+    (let ((temporary
+           (make-temp-file
+            (expand-file-name
+             ".avatar-"
+             bs-mu4e-notifications-avatar-cache-directory))))
+      (unwind-protect
+          (progn
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert data)
+              (let ((coding-system-for-write 'binary))
+                (write-region (point-min) (point-max)
+                              temporary nil 'silent)))
+            (rename-file temporary file t)
+            (setq temporary nil)
+            file)
+        (when (and temporary (file-exists-p temporary))
+          (delete-file temporary))))))
+
+(defun bs-mu4e--notifications-forget (id)
+  "Forget the message associated with notification ID."
+  (setq bs-mu4e--notifications-id-to-message-id
+        (assq-delete-all id
+                         bs-mu4e--notifications-id-to-message-id)))
+
+(defun bs-mu4e--notifications-read (message-id)
+  "Open the message identified by MESSAGE-ID through a Mu4e search.
+Preserve the current Headers query in Mu4e's search history."
+  (require 'mu4e-search)
+  (mu4e-search (concat "msgid:" message-id)
+               nil nil nil message-id t)
+  (select-frame-set-input-focus (selected-frame)))
+
+(defun bs-mu4e--notifications-mark-read (message-id)
+  "Mark the message identified by MESSAGE-ID as read."
+  (require 'mu4e-server)
+  (mu4e--server-move message-id nil "+S-u-N"))
+
+(defun bs-mu4e--notifications-action (id key)
+  "Apply action KEY to the Mu4e message associated with notification ID."
+  (when-let* ((message-id
+               (alist-get id
+                          bs-mu4e--notifications-id-to-message-id)))
+    (unwind-protect
+        (pcase key
+          ((or "default" "read")
+           (bs-mu4e--notifications-read message-id))
+          ("mark-read"
+           (bs-mu4e--notifications-mark-read message-id)))
+      (bs-mu4e--notifications-forget id))))
+
+(defun bs-mu4e--notifications-close (id _reason)
+  "Forget the Mu4e message associated with closed notification ID.
+REASON is ignored."
+  (bs-mu4e--notifications-forget id))
+
+(defun bs-mu4e--notifications-title (mail)
+  "Return the sender title for MAIL."
+  (let ((contacts (plist-get mail :from)))
+    (if contacts
+        (bs-mu4e-contact-display-names contacts)
+      "?")))
+
+(defun bs-mu4e--notifications-subject (mail)
+  "Return the notification subject for MAIL."
+  (let ((subject (plist-get mail :subject)))
+    (if (and (stringp subject) (not (string-empty-p subject)))
+        subject
+      "(No subject)")))
+
+(defun bs-mu4e--notifications-send (mail avatar-file)
+  "Notify about MAIL using AVATAR-FILE when it remains enabled."
+  (when (and bs-mu4e--notifications-enabled
+             (stringp (plist-get mail :message-id)))
+    (when-let* ((id
+                 (notifications-notify
+                  :title (bs-mu4e--notifications-title mail)
+                  :body (bs-mu4e--notifications-subject mail)
+                  :actions '("read" "Read"
+                             "mark-read" "Mark As Read"
+                             "default" "Read")
+                  :on-action #'bs-mu4e--notifications-action
+                  :on-close #'bs-mu4e--notifications-close
+                  :app-icon bs-mu4e-notifications-app-icon
+                  :image-path avatar-file
+                  :app-name "mu4e"
+                  :category "email.arrived")))
+      (setq bs-mu4e--notifications-id-to-message-id
+            (cons (cons id (plist-get mail :message-id))
+                  (assq-delete-all
+                   id bs-mu4e--notifications-id-to-message-id))))))
+
+(defun bs-mu4e--notifications-avatar-retrieved
+    (image address file generation)
+  "Deliver messages waiting for an avatar retrieval.
+IMAGE is the retrieved image or `error'.  ADDRESS and FILE identify
+the cache entry.  GENERATION rejects callbacks from a disabled
+notification adapter."
+  (when (= generation bs-mu4e--notifications-avatar-generation)
+    (let ((mails (gethash address
+                          bs-mu4e--notifications-avatar-waiters)))
+      (remhash address bs-mu4e--notifications-avatar-waiters)
+      (when (and bs-mu4e--notifications-enabled mails)
+        (let ((avatar-file
+               (and (not (eq image 'error))
+                    (condition-case nil
+                        (bs-mu4e--notifications-write-avatar file image)
+                      (error nil)))))
+          (dolist (mail (nreverse mails))
+            (bs-mu4e--notifications-send mail avatar-file)))))))
+
+(defun bs-mu4e--notifications-prepare (mail)
+  "Deliver MAIL after resolving its cached or remote sender avatar."
+  (if-let* ((address (bs-mu4e--notifications-avatar-address mail))
+            (file (bs-mu4e--notifications-avatar-file address)))
+      (cond
+       ((bs-mu4e--notifications-avatar-current-p file)
+        (bs-mu4e--notifications-send mail file))
+       ((gethash address bs-mu4e--notifications-avatar-waiters)
+        (push mail
+              (gethash address
+                       bs-mu4e--notifications-avatar-waiters)))
+       (t
+        (puthash address (list mail)
+                 bs-mu4e--notifications-avatar-waiters)
+        (condition-case nil
+            (gravatar-retrieve
+             address
+             #'bs-mu4e--notifications-avatar-retrieved
+             (list address file
+                   bs-mu4e--notifications-avatar-generation))
+          (error
+           (bs-mu4e--notifications-avatar-retrieved
+            'error address file
+            bs-mu4e--notifications-avatar-generation)))))
+    (bs-mu4e--notifications-send mail nil)))
+
+(defun bs-mu4e-notifications-notify-unread-messages (mails)
+  "Deliver one actionable desktop notification for every message in MAILS."
+  (when bs-mu4e--notifications-enabled
+    (dolist (mail mails)
+      (bs-mu4e--notifications-prepare mail))
+    (when mails
+      (mu4e-alert-set-window-urgency-maybe))))
+
+;;;###autoload
+(defun bs-mu4e-notifications-disable ()
+  "Restore `mu4e-alert' desktop notification delivery."
+  (interactive)
+  (when bs-mu4e--notifications-enabled
+    (setq bs-mu4e--notifications-enabled nil)
+    (cl-incf bs-mu4e--notifications-avatar-generation)
+    (advice-remove
+     'mu4e-alert-notify-unread-messages
+     #'bs-mu4e-notifications-notify-unread-messages)
+    (clrhash bs-mu4e--notifications-avatar-waiters)
+    (dolist (entry bs-mu4e--notifications-id-to-message-id)
+      (ignore-errors
+        (notifications-close-notification (car entry))))
+    (setq bs-mu4e--notifications-id-to-message-id nil)))
+
+;;;###autoload
+(defun bs-mu4e-notifications-enable ()
+  "Deliver actionable per-message Mu4e notifications through `mu4e-alert'."
+  (interactive)
+  (require 'gravatar)
+  (require 'mu4e-alert)
+  (require 'notifications)
+  (unless bs-mu4e--notifications-enabled
+    (setq bs-mu4e--notifications-enabled t)
+    (advice-add
+     'mu4e-alert-notify-unread-messages
+     :override #'bs-mu4e-notifications-notify-unread-messages)))
 
 (defun bs-mu4e--view-xwidget-available-p ()
   "Return non-nil when this Emacs can display WebKit Xwidgets."
