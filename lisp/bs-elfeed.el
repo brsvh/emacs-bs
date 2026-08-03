@@ -328,6 +328,8 @@ entries."
 (defvar-local bs-elfeed-search--saved-line-spacing nil)
 (defvar-local bs-elfeed-search--saved-line-spacing-local-p nil)
 (defvar-local bs-elfeed-search--line-spacing-saved-p nil)
+(defvar-local bs-elfeed-search--render-width nil)
+(defvar-local bs-elfeed-search--display-timer nil)
 
 (cl-defstruct
     (bs-elfeed--request
@@ -1125,6 +1127,22 @@ When FORCE is nil, redraw only after the database changes."
             'bs-elfeed-search-positive-score-face
           'bs-elfeed-search-negative-score-face))))))
 
+(defun bs-elfeed--search-set-first-entry-spacing (enabled)
+  "Add header spacing to the first Search entry when ENABLED.
+Remove spacing previously installed by this package otherwise."
+  (when (< (point-min) (point-max))
+    (let ((inhibit-read-only t))
+      (if enabled
+          (add-text-properties
+           (point-min) (1+ (point-min))
+           `(bs-elfeed-header-bottom-spacing t
+                                             line-prefix
+                                             ,(bs-elfeed--top-spacing-prefix
+                                               bs-elfeed-header-bottom-spacing)))
+        (remove-text-properties
+         (point-min) (1+ (point-min))
+         '(bs-elfeed-header-bottom-spacing nil line-prefix nil))))))
+
 (defun bs-elfeed-search-print-entry (entry)
   "Insert a one-line Gnus-inspired Search rendering for ENTRY."
   (let* ((start (point))
@@ -1153,6 +1171,7 @@ When FORCE is nil, redraw only after the database changes."
            (bs-elfeed--single-line
             (elfeed-entry-title entry) "[untitled]")
            title-width)))
+    (setq bs-elfeed-search--render-width width)
     (insert
      score " " marker " "
      (propertize
@@ -1165,12 +1184,7 @@ When FORCE is nil, redraw only after the database changes."
      (propertize date 'face 'bs-elfeed-search-timestamp-face)
      (make-string bs-elfeed-search-right-margin-width ?\s))
     (when (= start (point-min))
-      (add-text-properties
-       start (1+ start)
-       `(bs-elfeed-header-bottom-spacing t
-                                         line-prefix
-                                         ,(bs-elfeed--top-spacing-prefix
-                                           bs-elfeed-header-bottom-spacing))))))
+      (bs-elfeed--search-set-first-entry-spacing t))))
 
 (defun bs-elfeed--search-header ()
   "Return a Gnus-inspired header for the Elfeed Search buffer."
@@ -1232,7 +1246,7 @@ FIRST-P says that this is the first separator in the buffer."
     (concat
      (bs-elfeed--top-spacing-prefix top-spacing)
      (propertize
-      (concat title "\n")
+      (concat "  " (string-trim-left title) "\n")
       'face 'bs-elfeed-search-month-face
       'bs-elfeed-search-month-separator t
       'line-spacing bs-elfeed-search-month-line-spacing))))
@@ -1258,8 +1272,33 @@ FIRST-P says that this is the first separator in the buffer."
                        (bs-elfeed--search-month-string title (null last)))
           (setq last title))
         (forward-line 1)))
-    (when (= count 1)
-      (delete-overlay overlay))))
+    (if (= count 1)
+        (progn
+          (delete-overlay overlay)
+          (bs-elfeed--search-set-first-entry-spacing t))
+      (bs-elfeed--search-set-first-entry-spacing (zerop count)))))
+
+(defun bs-elfeed--search-display-refresh (buffer)
+  "Redraw Search BUFFER after it becomes visible at a new width."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq bs-elfeed-search--display-timer nil)
+      (when (derived-mode-p 'elfeed-search-mode)
+        (elfeed-search-update :resize)))))
+
+(defun bs-elfeed--search-window-buffer-change (window)
+  "Schedule a Search redraw when WINDOW displays it at a new width."
+  (when (and (window-live-p window)
+             (eq (window-buffer window) (current-buffer))
+             (derived-mode-p 'elfeed-search-mode))
+    (let ((width (window-body-width window)))
+      (unless (equal width bs-elfeed-search--render-width)
+        (when (timerp bs-elfeed-search--display-timer)
+          (cancel-timer bs-elfeed-search--display-timer))
+        (setq bs-elfeed-search--display-timer
+              (run-at-time
+               0.05 nil #'bs-elfeed--search-display-refresh
+               (current-buffer)))))))
 
 (defun bs-elfeed--search-configure-buffer ()
   "Configure the current Elfeed Search buffer for custom rendering."
@@ -1270,10 +1309,18 @@ FIRST-P says that this is the first separator in the buffer."
           bs-elfeed-search--saved-line-spacing line-spacing
           bs-elfeed-search--line-spacing-saved-p t))
   (setq-local line-spacing bs-elfeed-search-line-spacing
-              truncate-lines t))
+              truncate-lines t)
+  (add-hook 'window-buffer-change-functions
+            #'bs-elfeed--search-window-buffer-change nil t))
 
 (defun bs-elfeed--search-restore-buffer ()
   "Restore Search line spacing saved by the custom renderer."
+  (remove-hook 'window-buffer-change-functions
+               #'bs-elfeed--search-window-buffer-change t)
+  (when (timerp bs-elfeed-search--display-timer)
+    (cancel-timer bs-elfeed-search--display-timer))
+  (setq bs-elfeed-search--display-timer nil
+        bs-elfeed-search--render-width nil)
   (when bs-elfeed-search--line-spacing-saved-p
     (if bs-elfeed-search--saved-line-spacing-local-p
         (setq-local line-spacing
