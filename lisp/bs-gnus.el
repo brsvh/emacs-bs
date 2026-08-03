@@ -31,6 +31,7 @@
 (require 'bs-lib)
 (require 'gnus)
 (require 'mail-parse)
+(require 'seq)
 (require 'subr-x)
 
 (declare-function mail-header-date "nnheader" (header))
@@ -55,6 +56,7 @@
 (declare-function gnus-summary-insert-old-articles
                   "gnus-sum" (&optional all))
 (declare-function gnus-summary-insert-new-articles "gnus-sum" ())
+(declare-function gnus-summary-limit "gnus-sum" (articles))
 (declare-function gnus-summary-prepare "gnus-sum" ())
 (declare-function gnus-summary-recenter "gnus-sum" ())
 (declare-function gnus-split-references "gnus-sum" (references))
@@ -79,6 +81,20 @@
 (declare-function hl-line-move "hl-line" (overlay))
 (declare-function gnus-agent-fetch-articles
                   "gnus-agent" (group articles))
+(declare-function gnus-agent-article-name
+                  "gnus-agent" (article group))
+(declare-function gnus-agent-braid-nov
+                  "gnus-agent" (articles file))
+(declare-function gnus-agent-check-overview-buffer
+                  "gnus-agent" (&optional buffer))
+(declare-function gnus-agent-create-buffer "gnus-agent" ())
+(declare-function gnus-agent-load-alist "gnus-agent" (group))
+(declare-function gnus-agent-retrieve-headers
+                  "gnus-agent" (articles group &optional fetch-old))
+(declare-function gnus-agent-save-alist
+                  "gnus-agent" (group &optional articles state))
+(declare-function gnus-agent-save-group-info
+                  "gnus-agent" (method group active))
 (declare-function gnus-agent-method-p "gnus" (method-or-server))
 (declare-function gnus-agent-request-article
                   "gnus-agent" (article group))
@@ -87,10 +103,31 @@
                   "gnus-sum" (article))
 (declare-function nntp-list-active-group
                   "nntp" (group &optional server))
+(declare-function auth-source-pass-enable "auth-source-pass" ())
+(declare-function auth-source-search "auth-source" (&rest spec))
+(declare-function gnus-activate-group
+                  "gnus-start"
+                  (group &optional scan dont-check method dont-sub-check))
+(declare-function gnus-get-unread-articles-in-group
+                  "gnus-start" (info active &optional update))
+(declare-function gnus-make-hashtable-from-newsrc-alist
+                  "gnus-start" ())
+(declare-function gnus-set-active "gnus" (group active))
+(declare-function gnus-status-message "gnus" (command-method))
+(declare-function gnus-summary-insert-articles
+                  "gnus-sum" (articles))
 
 (defvar gnus-current-article)
+(defvar auth-sources)
+(defvar auth-source-pass-extra-query-keywords)
 (defvar gnus-agent)
+(defvar gnus-agent-article-alist)
 (defvar gnus-agent-cache)
+(defvar gnus-agent-covered-methods)
+(defvar gnus-agent-directory)
+(defvar gnus-agent-file-coding-system)
+(defvar gnus-agent-overview-buffer)
+(defvar gnus-active-hashtb)
 (defvar gnus-article-buffer)
 (defvar gnus-article-internal-prepare-hook)
 (defvar gnus-command-method)
@@ -112,6 +149,18 @@
 (defvar gnus-newsgroup-undownloaded)
 (defvar gnus-newsgroup-unseen)
 (defvar gnus-group-list-mode)
+(defvar gnus-group-mode-map)
+(defvar gnus-group-buffer)
+(defvar gnus-home-directory)
+(defvar gnus-directory)
+(defvar gnus-level-subscribed)
+(defvar gnus-newsrc-alist)
+(defvar gnus-newsrc-hashtb)
+(defvar gnus-opened-servers)
+(defvar gnus-plugged)
+(defvar gnus-select-method)
+(defvar gnus-secondary-select-methods)
+(defvar gnus-startup-file)
 (defvar gnus-summary-line-format)
 (defvar gnus-summary-buffer)
 (defvar gnus-ticked-mark)
@@ -122,6 +171,12 @@
 (defvar gnus-tmp-internal-hook)
 (defvar gnus-tmp-unread)
 (defvar gnus-unread-mark)
+(defvar gnus-use-cache)
+(defvar gnus-newsgroup-active)
+(defvar gnus-newsgroup-articles)
+(defvar gnus-newsgroup-highest)
+(defvar gnus-newsgroup-headers)
+(defvar gnus-newsgroup-unreads)
 (defvar hl-line-mode)
 (defvar hl-line-overlay)
 (defvar nntp-server-buffer)
@@ -187,6 +242,11 @@
 (defface bs-gnus-header-label-face
   '((t :inherit header-line :weight bold))
   "Face used for labels in Gnus header lines."
+  :group 'bs-gnus)
+
+(defface bs-gnus-update-value-face
+  '((t :inherit font-lock-keyword-face :slant italic))
+  "Face used for update times and progress values."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-group-face
@@ -371,6 +431,22 @@ from the alist use the label `Usenet'."
   :type 'number
   :group 'bs-gnus)
 
+(defcustom bs-gnus-update-interval (* 30 60)
+  "Seconds between complete background Gnus updates."
+  :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-update-retry-delays '(300 900 1800)
+  "Seconds to wait after consecutive background update failures.
+After exhausting the list, continue using its final delay."
+  :type '(repeat natnum)
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-update-stall-timeout 120
+  "Seconds without worker output before an update is considered stalled."
+  :type 'natnum
+  :group 'bs-gnus)
+
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
 
@@ -434,7 +510,1262 @@ from the alist use the label `Usenet'."
   (make-hash-table :test #'equal)
   "NNTP posting statuses cached by full Gnus group name.")
 
+(defvar bs-gnus--update-enabled nil
+  "Non-nil when background Gnus updates are installed.")
+
+(defvar bs-gnus--update-processes (make-hash-table :test #'equal)
+  "Live update worker processes keyed by Gnus server name.")
+
+(defvar bs-gnus--update-progress (make-hash-table :test #'equal)
+  "Worker progress records keyed by Gnus server name.")
+
+(defvar bs-gnus--update-failures (make-hash-table :test #'equal)
+  "Most recent worker failure messages keyed by Gnus server name.")
+
+(defvar bs-gnus--update-retry-counts (make-hash-table :test #'equal)
+  "Consecutive worker failure counts keyed by Gnus server name.")
+
+(defvar bs-gnus--update-retry-timers (make-hash-table :test #'equal)
+  "Retry timers keyed by Gnus server name.")
+
+(defvar bs-gnus--update-apply-queue nil
+  "Pending local operations produced by background workers.")
+
+(defvar bs-gnus--update-apply-timer nil
+  "Idle timer applying staged update results.")
+
+(defvar bs-gnus--update-apply-done 0
+  "Number of staged update operations applied in the current batch.")
+
+(defvar bs-gnus--update-apply-total 0
+  "Total staged update operations in the current batch.")
+
+(defvar bs-gnus--update-imported-bodies
+  (make-hash-table :test #'equal)
+  "Imported article numbers keyed by full Gnus group name.")
+
+(defvar bs-gnus--update-apply-errors
+  (make-hash-table :test #'equal)
+  "Local staging errors keyed by Gnus server name.")
+
+(defvar bs-gnus--update-periodic-timer nil
+  "Timer starting the next complete background update.")
+
+(defvar bs-gnus--update-start-timer nil
+  "Idle timer starting the first update of a Gnus session.")
+
+(defvar bs-gnus--update-header-timer nil
+  "Timer refreshing countdown text in Gnus header lines.")
+
+(defvar bs-gnus--update-next-time nil
+  "Absolute time scheduled for the next complete update.")
+
+(defvar bs-gnus--update-source-total 0
+  "Number of remote sources in the most recent complete update.")
+
+(defvar bs-gnus--update-original-group-g-binding nil
+  "Binding replaced by `bs-gnus-update' in `gnus-group-mode-map'.")
+
+(defvar bs-gnus--update-group-binding-saved-p nil
+  "Non-nil after saving the original Group `g' binding.")
+
+(defvar bs-gnus--update-worker-credential nil
+  "Credential supplied to the isolated update worker.")
+
+(defvar bs-gnus--update-worker-auth-source-search-function nil
+  "Original `auth-source-search' function in an update worker.")
+
+(defvar bs-gnus--update-header-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'bs-gnus-update)
+    (define-key map [mode-line mouse-1] #'bs-gnus-update)
+    map)
+  "Keymap used by the clickable Group update status.")
+
+(defconst bs-gnus--update-protocol-version 1
+  "Protocol version shared with background update workers.")
+
+(defconst bs-gnus--update-header-chunk-size 200
+  "Maximum number of headers fetched between progress reports.")
+
+(defconst bs-gnus--update-body-chunk-size 10
+  "Maximum number of article bodies fetched between progress reports.")
+
+(defconst bs-gnus--update-apply-time-budget 0.01
+  "Maximum seconds spent in one staged-result application slice.")
+
 (put 'bs-gnus--summary-fold-state 'permanent-local t)
+
+(defun bs-gnus--group-buffers ()
+  "Return live Gnus Group buffers."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (derived-mode-p 'gnus-group-mode)))
+   (buffer-list)))
+
+(defun bs-gnus--summary-buffers ()
+  "Return live Gnus Summary buffers."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (derived-mode-p 'gnus-summary-mode)))
+   (buffer-list)))
+
+(defun bs-gnus--update-worker-emit (kind payload)
+  "Write a worker message of KIND containing PAYLOAD to standard output."
+  (princ (format "BS-GNUS-%s %S\n" kind payload)))
+
+(defun bs-gnus--update-worker-read-request ()
+  "Read one background update request from standard input."
+  (with-temp-buffer
+    (insert-file-contents "/dev/stdin")
+    (goto-char (point-min))
+    (read (current-buffer))))
+
+(defun bs-gnus--update-worker-auth-source-search (&rest spec)
+  "Return the worker credential or search authentication using SPEC."
+  (if bs-gnus--update-worker-credential
+      (list bs-gnus--update-worker-credential)
+    (apply bs-gnus--update-worker-auth-source-search-function spec)))
+
+(defun bs-gnus--update-worker-article-range (low high)
+  "Return the inclusive article-number sequence from LOW through HIGH."
+  (when (<= low high)
+    (number-sequence low high)))
+
+(defun bs-gnus--update-worker-filter-active (articles active)
+  "Return ARTICLES whose numbers fall within ACTIVE."
+  (let ((low (or (car active) 0))
+        (high (or (cdr active) -1)))
+    (seq-filter
+     (lambda (article)
+       (and (integerp article)
+            (<= low article high)))
+     articles)))
+
+(defun bs-gnus--update-worker-scan-groups (groups method)
+  "Scan GROUPS through METHOD and return fetch plans."
+  (let ((done 0)
+        (total (length groups))
+        plans
+        errors)
+    (dolist (spec groups)
+      (let ((group (plist-get spec :group)))
+        (condition-case err
+            (if-let* ((active
+                       (gnus-activate-group
+                        group nil nil method)))
+                (let* ((old-active (plist-get spec :active))
+                       (old-high (or (cdr old-active) 0))
+                       (new-low
+                        (max (or (car active) 0)
+                             (1+ old-high)))
+                       (new-articles
+                        (bs-gnus--update-worker-article-range
+                         new-low (or (cdr active) -1)))
+                       (body-articles
+                        (sort
+                         (delete-dups
+                          (append
+                           (copy-sequence
+                            (plist-get spec :missing-bodies))
+                           (copy-sequence new-articles)))
+                         #'<))
+                       (body-articles
+                        (bs-gnus--update-worker-filter-active
+                         body-articles active)))
+                  (push
+                   (list :group group
+                         :active active
+                         :new-articles new-articles
+                         :header-articles body-articles
+                         :body-articles body-articles)
+                   plans))
+              (let ((status
+                     (string-trim
+                      (or (ignore-errors
+                            (gnus-status-message method))
+                          ""))))
+                (push
+                 (cons group
+                       (if (string-empty-p status)
+                           "Cannot activate group"
+                         status))
+                 errors)))
+          (error
+           (push (cons group (error-message-string err)) errors))))
+      (setq done (1+ done))
+      (bs-gnus--update-worker-emit
+       "PROGRESS"
+       (list :phase 'checking :done done :total total)))
+    (list (nreverse plans) (nreverse errors))))
+
+(defun bs-gnus--update-worker-fetch-group
+    (plan completed total)
+  "Fetch the staged data described by PLAN.
+COMPLETED and TOTAL describe body-download progress.  Return a
+pair containing the fetched body numbers and any errors."
+  (let* ((group (plist-get plan :group))
+         (headers (plist-get plan :header-articles))
+         (bodies (plist-get plan :body-articles))
+         fetched
+         errors)
+    (dolist (chunk (seq-partition
+                    headers bs-gnus--update-header-chunk-size))
+      (condition-case err
+          (gnus-agent-retrieve-headers chunk group)
+        (error
+         (push (cons group (error-message-string err)) errors)))
+      (bs-gnus--update-worker-emit
+       "PROGRESS"
+       (list :phase 'downloading
+             :done completed :total total)))
+    (dolist (chunk (seq-partition
+                    bodies bs-gnus--update-body-chunk-size))
+      (condition-case err
+          (setq fetched
+                (nconc fetched
+                       (gnus-agent-fetch-articles group chunk)))
+        (error
+         (push (cons group (error-message-string err)) errors)))
+      (setq completed (+ completed (length chunk)))
+      (bs-gnus--update-worker-emit
+       "PROGRESS"
+       (list :phase 'downloading
+             :done completed :total total)))
+    (list fetched (nreverse errors) completed)))
+
+(defun bs-gnus--update-worker-run (request)
+  "Execute background update REQUEST and return its result."
+  (unless (= (or (plist-get request :protocol) -1)
+             bs-gnus--update-protocol-version)
+    (error "Unsupported bs-gnus update protocol"))
+  (require 'auth-source-pass)
+  (setq auth-source-pass-extra-query-keywords
+        (plist-get request :auth-source-pass-extra-query-keywords))
+  (auth-source-pass-enable)
+  (setq auth-sources (plist-get request :auth-sources))
+  (require 'gnus-agent)
+  (require 'gnus-start)
+  (let* ((source (plist-get request :source))
+         (method (plist-get request :method))
+         (groups (plist-get request :groups))
+         (stage (file-name-as-directory
+                 (plist-get request :stage)))
+         (gnus-agent-directory stage)
+         (gnus-home-directory stage)
+         (gnus-directory stage)
+         (gnus-startup-file (expand-file-name "newsrc" stage))
+         (gnus-select-method method)
+         (gnus-secondary-select-methods nil)
+         (gnus-agent t)
+         (gnus-agent-cache t)
+         (gnus-agent-covered-methods (list source))
+         (gnus-opened-servers nil)
+         (gnus-plugged t)
+         (gnus-use-cache nil)
+         (bs-gnus--update-worker-credential
+          (plist-get request :credential))
+         (bs-gnus--update-worker-auth-source-search-function
+          (symbol-function 'auth-source-search))
+         (gnus-newsrc-alist
+          (cons
+           (gnus-info-make "dummy.group" 0 nil)
+           (mapcar
+            (lambda (spec)
+              (gnus-info-make
+               (plist-get spec :group)
+               3
+               (plist-get spec :read)
+               nil method))
+            groups)))
+         plans
+         errors
+         results
+         (completed 0)
+         total)
+    (cl-letf (((symbol-function 'auth-source-search)
+               #'bs-gnus--update-worker-auth-source-search))
+      (setq gnus-active-hashtb (gnus-make-hashtable 50))
+      (gnus-make-hashtable-from-newsrc-alist)
+      (pcase-let ((`(,scanned ,scan-errors)
+                   (bs-gnus--update-worker-scan-groups
+                    groups method)))
+        (setq plans scanned
+              errors scan-errors))
+      (setq total
+            (cl-loop
+             for plan in plans
+             sum (length (plist-get plan :body-articles))))
+      (bs-gnus--update-worker-emit
+       "PROGRESS"
+       (list :phase 'downloading :done 0 :total total))
+      (dolist (plan plans)
+        (pcase-let ((`(,fetched ,fetch-errors ,new-completed)
+                     (bs-gnus--update-worker-fetch-group
+                      plan completed total)))
+          (setq completed new-completed
+                errors (nconc errors fetch-errors))
+          (push
+           (append
+            plan
+            (list :fetched-bodies fetched))
+           results)))
+      (list :protocol bs-gnus--update-protocol-version
+            :source source
+            :method method
+            :stage stage
+            :groups (nreverse results)
+            :errors errors))))
+
+;;;###autoload
+(defun bs-gnus-update-worker ()
+  "Run one noninteractive Gnus update worker from standard input."
+  (let ((inhibit-message t)
+        (message-log-max nil)
+        result)
+    (condition-case err
+        (setq result
+              (bs-gnus--update-worker-run
+               (bs-gnus--update-worker-read-request)))
+      (error
+       (setq result
+             (list :protocol bs-gnus--update-protocol-version
+                   :fatal (error-message-string err)))))
+    (bs-gnus--update-worker-emit "RESULT" result)))
+
+(defun bs-gnus--update-active-p ()
+  "Return non-nil while a worker or local apply operation is active."
+  (or (> (hash-table-count bs-gnus--update-processes) 0)
+      bs-gnus--update-apply-queue
+      (timerp bs-gnus--update-apply-timer)))
+
+(defun bs-gnus--update-force-header ()
+  "Redisplay visible Gnus header lines."
+  (dolist (buffer (append (bs-gnus--group-buffers)
+                          (bs-gnus--summary-buffers)))
+    (with-current-buffer buffer
+      (force-mode-line-update t))))
+
+(defun bs-gnus--update-next-text ()
+  "Return the time remaining before the next complete update."
+  (if (not bs-gnus--update-next-time)
+      "not scheduled"
+    (let ((seconds
+           (max 0
+                (float-time
+                 (time-subtract
+                  bs-gnus--update-next-time
+                  (current-time))))))
+      (if (< seconds 60)
+          "<1 minutes"
+        (format "%d minutes" (ceiling (/ seconds 60.0)))))))
+
+(defun bs-gnus--update-progress-record (source payload)
+  "Merge worker progress PAYLOAD into the record for SOURCE."
+  (let ((record (copy-sequence
+                 (or (gethash source bs-gnus--update-progress)
+                     (list :phase 'checking
+                           :check-done 0 :check-total 0
+                           :download-done 0 :download-total 0))))
+        (phase (plist-get payload :phase)))
+    (setq record (plist-put record :phase phase))
+    (pcase phase
+      ('checking
+       (setq record
+             (plist-put record :check-done
+                        (or (plist-get payload :done) 0))
+             record
+             (plist-put record :check-total
+                        (or (plist-get payload :total) 0))))
+      ('downloading
+       (setq record
+             (plist-put record :download-done
+                        (or (plist-get payload :done) 0))
+             record
+             (plist-put record :download-total
+                        (or (plist-get payload :total) 0)))))
+    (puthash source record bs-gnus--update-progress)))
+
+(defun bs-gnus--update-progress-text ()
+  "Return the aggregate worker or local-apply progress text."
+  (cond
+   ((or bs-gnus--update-apply-queue
+        (timerp bs-gnus--update-apply-timer))
+    (format "APPLYING %d/%d"
+            bs-gnus--update-apply-done
+            bs-gnus--update-apply-total))
+   ((> (hash-table-count bs-gnus--update-processes) 0)
+    (let ((checking nil)
+          (check-done 0)
+          (check-total 0)
+          (download-done 0)
+          (download-total 0))
+      (maphash
+       (lambda (_source record)
+         (when (eq (plist-get record :phase) 'checking)
+           (setq checking t))
+         (setq check-done
+               (+ check-done
+                  (if (eq (plist-get record :phase) 'checking)
+                      (or (plist-get record :check-done) 0)
+                    (or (plist-get record :check-total) 0)))
+               check-total
+               (+ check-total
+                  (or (plist-get record :check-total) 0))
+               download-done
+               (+ download-done
+                  (or (plist-get record :download-done) 0))
+               download-total
+               (+ download-total
+                  (or (plist-get record :download-total) 0))))
+       bs-gnus--update-progress)
+      (if checking
+          (format "CHECKING %d/%d" check-done check-total)
+        (format "DOWNLOADING %d/%d"
+                download-done download-total))))
+   (t nil)))
+
+(defun bs-gnus--update-header-status ()
+  "Return the clickable background-update status for the Group header."
+  (let* ((progress (bs-gnus--update-progress-text))
+         (failure-count (hash-table-count bs-gnus--update-failures))
+         (text
+          (cond
+           (progress
+            (pcase-let ((`(,label ,value)
+                         (split-string progress " " t)))
+              (concat
+               (propertize label 'face 'bs-gnus-header-label-face)
+               " "
+               (propertize value 'face 'bs-gnus-update-value-face))))
+           ((> failure-count 0)
+            (concat
+             (propertize "UPDATE FAILED"
+                         'face 'bs-gnus-header-label-face)
+             " "
+             (propertize
+              (format "%d/%d"
+                      failure-count
+                      (max failure-count
+                           bs-gnus--update-source-total))
+              'face '(error bs-gnus-update-value-face))))
+           (t
+            (concat
+             (propertize "NEXT UPDATE"
+                         'face 'bs-gnus-header-label-face)
+             " "
+             (propertize (bs-gnus--update-next-text)
+                         'face 'bs-gnus-update-value-face))))))
+    (add-text-properties
+     0 (length text)
+     (list 'mouse-face 'mode-line-highlight
+           'help-echo "mouse-1: update Gnus in the background"
+           'keymap bs-gnus--update-header-map)
+     text)
+    text))
+
+(defun bs-gnus--update-missing-bodies (group)
+  "Return unread article numbers in GROUP absent from the Agent."
+  (require 'gnus-agent)
+  (let ((unread (gnus-list-of-unread-articles group))
+        (gnus-agent-article-alist nil))
+    (gnus-agent-load-alist group)
+    (seq-remove
+     (lambda (article)
+       (or (cdr (assq article gnus-agent-article-alist))
+           (file-exists-p
+            (gnus-agent-article-name
+             (number-to-string article) group))))
+     unread)))
+
+(defun bs-gnus--update-sources ()
+  "Return background-update requests grouped by remote NNTP source."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (info (cdr gnus-newsrc-alist))
+      (when (<= (gnus-info-level info) gnus-level-subscribed)
+        (let* ((group (gnus-info-group info))
+               (method (gnus-find-method-for-group group)))
+          (when (eq (car method) 'nntp)
+            (let* ((source (gnus-method-to-server method t))
+                   (entry (gethash source table))
+                   (spec
+                    (list :group group
+                          :active (copy-tree
+                                   (or (gnus-active group)
+                                       '(0 . 0)))
+                          :read (copy-tree (gnus-info-read info))
+                          :missing-bodies
+                          (bs-gnus--update-missing-bodies group))))
+              (if entry
+                  (setf (plist-get entry :groups)
+                        (nconc (plist-get entry :groups)
+                               (list spec)))
+                (puthash
+                 source
+                 (list :source source
+                       :method method
+                       :groups (list spec))
+                 table)))))))
+    (let (sources)
+      (maphash (lambda (_source entry) (push entry sources)) table)
+      (sort sources
+            (lambda (left right)
+              (string-lessp (plist-get left :source)
+                            (plist-get right :source)))))))
+
+(defun bs-gnus--update-source (source)
+  "Return the current update request for SOURCE."
+  (seq-find
+   (lambda (entry)
+     (equal (plist-get entry :source) source))
+   (bs-gnus--update-sources)))
+
+(defun bs-gnus--update-cancel-timer (timer)
+  "Cancel TIMER when it is live."
+  (when (timerp timer)
+    (cancel-timer timer)))
+
+(defun bs-gnus--update-cancel-retry (source)
+  "Cancel the pending retry for SOURCE."
+  (when-let* ((timer (gethash source bs-gnus--update-retry-timers)))
+    (bs-gnus--update-cancel-timer timer)
+    (remhash source bs-gnus--update-retry-timers)))
+
+(defun bs-gnus--update-retry-delay (failure-count)
+  "Return the retry delay for FAILURE-COUNT consecutive failures."
+  (let* ((delays (or bs-gnus-update-retry-delays
+                     (list bs-gnus-update-interval)))
+         (index (min (1- (max 1 failure-count))
+                     (1- (length delays)))))
+    (max 1 (nth index delays))))
+
+(defun bs-gnus--update-retry-source (source)
+  "Retry the failed background update for SOURCE."
+  (bs-gnus--update-cancel-retry source)
+  (when (and bs-gnus--update-enabled
+             (gnus-alive-p)
+             (not (gethash source bs-gnus--update-processes)))
+    (if-let* ((entry (bs-gnus--update-source source)))
+        (bs-gnus--update-start-source entry)
+      (remhash source bs-gnus--update-failures)
+      (remhash source bs-gnus--update-retry-counts))))
+
+(defun bs-gnus--update-record-failure (source errors)
+  "Record ERRORS for SOURCE and schedule its next retry."
+  (let* ((count (1+ (or (gethash source
+                                 bs-gnus--update-retry-counts)
+                        0)))
+         (delay (bs-gnus--update-retry-delay count)))
+    (puthash source count bs-gnus--update-retry-counts)
+    (puthash source errors bs-gnus--update-failures)
+    (bs-gnus--update-cancel-retry source)
+    (when (and bs-gnus--update-enabled (gnus-alive-p))
+      (puthash
+       source
+       (run-at-time delay nil
+                    #'bs-gnus--update-retry-source source)
+       bs-gnus--update-retry-timers))))
+
+(defun bs-gnus--update-record-success (source)
+  "Clear failure and retry state for SOURCE."
+  (bs-gnus--update-cancel-retry source)
+  (remhash source bs-gnus--update-failures)
+  (remhash source bs-gnus--update-retry-counts))
+
+(defun bs-gnus--update-schedule-next ()
+  "Schedule the next complete background update."
+  (bs-gnus--update-cancel-timer bs-gnus--update-periodic-timer)
+  (let ((delay (max 1 bs-gnus-update-interval)))
+    (setq bs-gnus--update-next-time
+          (time-add (current-time) delay)
+          bs-gnus--update-periodic-timer
+          (run-at-time delay nil #'bs-gnus--update-periodic))))
+
+(defun bs-gnus--update-periodic ()
+  "Start one scheduled complete background update."
+  (setq bs-gnus--update-periodic-timer nil
+        bs-gnus--update-next-time nil)
+  (when (and bs-gnus--update-enabled (gnus-alive-p))
+    (if (bs-gnus--update-active-p)
+        (bs-gnus--update-schedule-next)
+      (bs-gnus-update))))
+
+(defun bs-gnus--update-worker-command ()
+  "Return the command used to start an isolated update worker."
+  (let ((library (or (symbol-file 'bs-gnus-update-worker 'defun)
+                     load-file-name
+                     buffer-file-name)))
+    (unless library
+      (error "Cannot locate bs-gnus for the update worker"))
+    (list (expand-file-name invocation-name invocation-directory)
+          "-Q" "--batch"
+          "-L" (file-name-directory library)
+          "-l" library
+          "-f" "bs-gnus-update-worker")))
+
+(defun bs-gnus--update-reset-watchdog (process)
+  "Reset the inactivity watchdog belonging to PROCESS."
+  (bs-gnus--update-cancel-timer
+   (process-get process 'bs-gnus-watchdog))
+  (process-put
+   process 'bs-gnus-watchdog
+   (run-at-time
+    (max 1 bs-gnus-update-stall-timeout) nil
+    #'bs-gnus--update-worker-stalled process)))
+
+(defun bs-gnus--update-worker-stalled (process)
+  "Terminate PROCESS after it stops reporting progress."
+  (when (process-live-p process)
+    (process-put process 'bs-gnus-stalled t)
+    (delete-process process)))
+
+(defun bs-gnus--update-process-line (process line)
+  "Handle one protocol LINE received from PROCESS."
+  (cond
+   ((string-prefix-p "BS-GNUS-PROGRESS " line)
+    (when-let* ((payload
+                 (ignore-errors
+                   (read
+                    (substring
+                     line (length "BS-GNUS-PROGRESS "))))))
+      (bs-gnus--update-progress-record
+       (process-get process 'bs-gnus-source)
+       payload)
+      (bs-gnus--update-force-header)))
+   ((string-prefix-p "BS-GNUS-RESULT " line)
+    (process-put
+     process 'bs-gnus-result
+     (ignore-errors
+       (read
+        (substring line (length "BS-GNUS-RESULT "))))))))
+
+(defun bs-gnus--update-process-filter (process output)
+  "Consume protocol OUTPUT from background update PROCESS."
+  (bs-gnus--update-reset-watchdog process)
+  (let ((pending (concat (or (process-get process 'bs-gnus-pending) "")
+                         output))
+        newline)
+    (while (setq newline (string-search "\n" pending))
+      (bs-gnus--update-process-line
+       process (substring pending 0 newline))
+      (setq pending (substring pending (1+ newline))))
+    (process-put process 'bs-gnus-pending pending)))
+
+(defun bs-gnus--update-delete-stage (stage)
+  "Delete the private temporary update directory STAGE."
+  (when (and (stringp stage)
+             (file-directory-p stage)
+             (string-prefix-p
+              (expand-file-name "bs-gnus-update-"
+                                temporary-file-directory)
+              (expand-file-name stage)))
+    (delete-directory stage t)))
+
+(defun bs-gnus--update-process-error (process event)
+  "Return a concise failure description for PROCESS and EVENT."
+  (let* ((buffer (process-get process 'bs-gnus-stderr))
+         (details
+          (and (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (string-trim (buffer-string))))))
+    (cond
+     ((process-get process 'bs-gnus-stalled)
+      (format "No worker progress for %d seconds"
+              bs-gnus-update-stall-timeout))
+     ((and details (not (string-empty-p details)))
+      (truncate-string-to-width details 300 nil nil "..."))
+     (t (string-trim event)))))
+
+(defun bs-gnus--update-finish-process (process event)
+  "Finalize background PROCESS after EVENT."
+  (when (memq (process-status process) '(exit signal failed))
+    (when-let* ((pending (process-get process 'bs-gnus-pending))
+                ((not (string-empty-p pending))))
+      (bs-gnus--update-process-line process pending))
+    (bs-gnus--update-cancel-timer
+     (process-get process 'bs-gnus-watchdog))
+    (let* ((source (process-get process 'bs-gnus-source))
+           (stage (process-get process 'bs-gnus-stage))
+           (result (process-get process 'bs-gnus-result)))
+      (when (eq process (gethash source bs-gnus--update-processes))
+        (remhash source bs-gnus--update-processes))
+      (cond
+       ((and result
+             (= (or (plist-get result :protocol) -1)
+                bs-gnus--update-protocol-version)
+             (not (plist-get result :fatal)))
+        (bs-gnus--update-enqueue-result result))
+       (t
+        (let ((error
+               (or (plist-get result :fatal)
+                   (bs-gnus--update-process-error process event))))
+          (bs-gnus--update-record-failure source (list error))
+          (remhash source bs-gnus--update-progress)
+          (bs-gnus--update-delete-stage stage))))
+      (dolist (buffer (list (process-buffer process)
+                            (process-get process 'bs-gnus-stderr)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))
+      (bs-gnus--update-force-header))))
+
+(defun bs-gnus--update-process-sentinel (process event)
+  "Dispatch update PROCESS completion described by EVENT."
+  (bs-gnus--update-finish-process process event))
+
+(defun bs-gnus--update-method-address (method)
+  "Return the network address configured by NNTP METHOD."
+  (or (cadr (assq 'nntp-address (cddr method)))
+      (cadr method)))
+
+(defun bs-gnus--update-credential (method)
+  "Return a serializable authentication record for NNTP METHOD."
+  (require 'auth-source)
+  (when-let* ((entry
+               (car
+                (auth-source-search
+                 :max 1
+                 :host (bs-gnus--update-method-address method)
+                 :require '(:user :secret))))
+              (secret (plist-get entry :secret))
+              (password
+               (if (functionp secret)
+                   (funcall secret)
+                 secret)))
+    (list :host (plist-get entry :host)
+          :port (plist-get entry :port)
+          :user (plist-get entry :user)
+          :secret password
+          :force t)))
+
+(defun bs-gnus--update-start-source (entry)
+  "Start the isolated worker described by source ENTRY."
+  (let* ((source (plist-get entry :source))
+         (stage (make-temp-file "bs-gnus-update-" t))
+         (stdout (generate-new-buffer
+                  (format " *bs-gnus-update %s*" source)))
+         (stderr (generate-new-buffer
+                  (format " *bs-gnus-update %s stderr*" source)))
+         (request
+          (list :protocol bs-gnus--update-protocol-version
+                :source source
+                :method (plist-get entry :method)
+                :groups (plist-get entry :groups)
+                :stage stage
+                :auth-sources auth-sources
+                :auth-source-pass-extra-query-keywords
+                (and (boundp 'auth-source-pass-extra-query-keywords)
+                     auth-source-pass-extra-query-keywords)
+                :credential
+                (bs-gnus--update-credential
+                 (plist-get entry :method))))
+         process)
+    (bs-gnus--update-cancel-retry source)
+    (condition-case err
+        (progn
+          (setq process
+                (make-process
+                 :name (format "bs-gnus-update-%s" source)
+                 :buffer stdout
+                 :stderr stderr
+                 :command (bs-gnus--update-worker-command)
+                 :coding 'utf-8-unix
+                 :connection-type 'pipe
+                 :filter #'bs-gnus--update-process-filter
+                 :sentinel #'bs-gnus--update-process-sentinel
+                 :noquery t))
+          (process-put process 'bs-gnus-source source)
+          (process-put process 'bs-gnus-stage stage)
+          (process-put process 'bs-gnus-stderr stderr)
+          (puthash source process bs-gnus--update-processes)
+          (puthash
+           source
+           (list :phase 'checking
+                 :check-done 0
+                 :check-total (length (plist-get entry :groups))
+                 :download-done 0
+                 :download-total 0)
+           bs-gnus--update-progress)
+          (bs-gnus--update-reset-watchdog process)
+          (process-send-string process
+                               (concat (prin1-to-string request) "\n"))
+          (process-send-eof process))
+      (error
+       (when (process-live-p process)
+         (delete-process process))
+       (dolist (buffer (list stdout stderr))
+         (when (buffer-live-p buffer)
+           (kill-buffer buffer)))
+       (bs-gnus--update-delete-stage stage)
+       (bs-gnus--update-record-failure
+        source (list (error-message-string err)))))))
+
+;;;###autoload
+(defun bs-gnus-update ()
+  "Update Gnus remotely without blocking the main Emacs process."
+  (interactive)
+  (unless (gnus-alive-p)
+    (user-error "Gnus is not running"))
+  (if (bs-gnus--update-active-p)
+      (message "%s" (or (bs-gnus--update-progress-text)
+                        "Gnus update already in progress"))
+    (let ((sources (bs-gnus--update-sources)))
+      (setq bs-gnus--update-source-total (length sources))
+      (bs-gnus--update-schedule-next)
+      (if (not sources)
+          (message "No subscribed NNTP groups to update")
+        (dolist (entry sources)
+          (bs-gnus--update-start-source entry))
+        (bs-gnus--update-force-header)))))
+
+(defun bs-gnus--update-agent-file (directory method group name)
+  "Return the Agent file NAME for GROUP and METHOD below DIRECTORY."
+  (let ((gnus-agent-directory (file-name-as-directory directory))
+        (gnus-command-method method))
+    (gnus-agent-article-name name group)))
+
+(defun bs-gnus--update-overview-articles (file)
+  "Return sorted article numbers present in overview FILE."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let (articles)
+        (while (re-search-forward "^\\([0-9]+\\)\t" nil t)
+          (push (string-to-number (match-string 1)) articles))
+        (nreverse articles)))))
+
+(defun bs-gnus--update-merge-overview
+    (stage method group header-articles)
+  "Merge staged overview data for GROUP through METHOD.
+STAGE is the worker Agent root.  HEADER-ARTICLES contains the
+requested header numbers.  Return the numbers actually available."
+  (require 'gnus-agent)
+  (let* ((live-directory gnus-agent-directory)
+         (stage-file
+          (bs-gnus--update-agent-file
+           stage method group ".overview"))
+         (live-file
+          (bs-gnus--update-agent-file
+           live-directory method group ".overview"))
+         (available
+          (seq-intersection
+           header-articles
+           (or (bs-gnus--update-overview-articles stage-file) nil)
+           #'=)))
+    (when available
+      (gnus-agent-create-buffer)
+      (with-current-buffer gnus-agent-overview-buffer
+        (erase-buffer)
+        (insert-file-contents stage-file))
+      (let ((gnus-command-method method))
+        (gnus-agent-braid-nov available live-file)
+        (with-current-buffer nntp-server-buffer
+          (gnus-agent-check-overview-buffer)
+          (make-directory (file-name-directory live-file) t)
+          (let ((coding-system-for-write
+                 gnus-agent-file-coding-system))
+            (write-region (point-min) (point-max)
+                          live-file nil 'silent)))
+        (let ((gnus-agent-article-alist nil))
+          (gnus-agent-load-alist group)
+          (gnus-agent-save-alist group available nil))))
+    available))
+
+(defun bs-gnus--update-apply-metadata
+    (_source method stage plan)
+  "Apply active and overview metadata in PLAN from STAGE through METHOD."
+  (let* ((group (plist-get plan :group))
+         (active (plist-get plan :active))
+         (available
+          (bs-gnus--update-merge-overview
+           stage method group
+           (plist-get plan :header-articles)))
+         (info (gnus-get-info group)))
+    (setf (plist-get plan :available-headers) available)
+    (when (and info active)
+      (gnus-set-active group (copy-tree active))
+      (gnus-get-unread-articles-in-group info active)
+      (let ((gnus-command-method method))
+        (gnus-agent-save-group-info
+         method (gnus-group-real-name group) active)))))
+
+(defun bs-gnus--update-copy-body
+    (_source method stage group article)
+  "Copy staged ARTICLE for GROUP through METHOD into the live Agent."
+  (let* ((live-directory gnus-agent-directory)
+         (name (number-to-string article))
+         (source-file
+          (bs-gnus--update-agent-file
+           stage method group name))
+         (destination
+          (bs-gnus--update-agent-file
+           live-directory method group name)))
+    (when (file-readable-p source-file)
+      (unless (file-exists-p destination)
+        (make-directory (file-name-directory destination) t)
+        (copy-file source-file destination))
+      (puthash
+       group
+       (cons article
+             (gethash group bs-gnus--update-imported-bodies))
+       bs-gnus--update-imported-bodies))))
+
+(defun bs-gnus--update-summary-window-states (buffer)
+  "Return visible-window positions anchored to articles in BUFFER."
+  (mapcar
+   (lambda (window)
+     (let ((start (window-start window)))
+       (list
+        window
+        (or (get-text-property start 'gnus-intangible buffer)
+            (with-current-buffer buffer
+              (save-excursion
+                (goto-char start)
+                (gnus-summary-article-number))))
+        (window-hscroll window))))
+   (get-buffer-window-list buffer nil t)))
+
+(defun bs-gnus--update-restore-summary-windows (buffer states)
+  "Restore BUFFER windows from article-anchored STATES."
+  (dolist (state states)
+    (pcase-let ((`(,window ,article ,hscroll) state))
+      (when (and (window-live-p window)
+                 (eq (window-buffer window) buffer))
+        (when article
+          (with-current-buffer buffer
+            (save-excursion
+              (when (gnus-summary-goto-subject article nil t)
+                (set-window-start window
+                                  (line-beginning-position))))))
+        (set-window-hscroll window hscroll)))))
+
+(defun bs-gnus--update-current-summary-article ()
+  "Return the article anchoring point in the current Summary buffer."
+  (or (get-text-property (point) 'gnus-intangible)
+      (gnus-summary-article-number)))
+
+(defun bs-gnus--update-refresh-summary (group active new-articles)
+  "Insert NEW-ARTICLES for GROUP locally and record ACTIVE."
+  (dolist (buffer (bs-gnus--summary-buffers))
+    (with-current-buffer buffer
+      (when (equal gnus-newsgroup-name group)
+        (let ((selected (bs-gnus--update-current-summary-article))
+              (states
+               (bs-gnus--update-summary-window-states buffer))
+              (old
+               (sort
+                (mapcar #'gnus-data-number gnus-newsgroup-data)
+                #'<)))
+          (setq gnus-newsgroup-active (copy-tree active)
+                gnus-newsgroup-highest (cdr active))
+          (when new-articles
+            (let ((gnus-agent-cache t))
+              (gnus-summary-insert-articles new-articles))
+            (setq gnus-newsgroup-unreads
+                  (gnus-sorted-nunion
+                   gnus-newsgroup-unreads new-articles))
+            (gnus-summary-limit
+             (gnus-sorted-nunion old new-articles)))
+          (when selected
+            (gnus-summary-goto-subject selected nil t))
+          (bs-gnus--update-restore-summary-windows
+           buffer states))))))
+
+(defun bs-gnus--update-finish-group
+    (_source method _stage plan)
+  "Finalize live Agent and Summary state described by PLAN through METHOD."
+  (let* ((group (plist-get plan :group))
+         (imported
+          (sort
+           (delete-dups
+            (gethash group bs-gnus--update-imported-bodies))
+           #'<))
+         (available (plist-get plan :available-headers))
+         (new-articles
+          (seq-intersection
+           (plist-get plan :new-articles)
+           available #'=)))
+    (remhash group bs-gnus--update-imported-bodies)
+    (when imported
+      (let ((gnus-command-method method)
+            (gnus-agent-article-alist nil))
+        (gnus-agent-load-alist group)
+        (gnus-agent-save-alist
+         group imported (time-to-days nil))))
+    (bs-gnus--update-refresh-summary
+     group (plist-get plan :active) new-articles)))
+
+(defun bs-gnus--update-group-identity-at (buffer position)
+  "Return the Group or Topic identity at POSITION in BUFFER."
+  (with-current-buffer buffer
+    (list (get-text-property position 'gnus-group)
+          (get-text-property position 'gnus-topic))))
+
+(defun bs-gnus--update-find-group-identity (group topic)
+  "Return the current buffer position matching GROUP or TOPIC."
+  (save-excursion
+    (goto-char (point-min))
+    (catch 'position
+      (while (not (eobp))
+        (when (or (and group
+                       (equal group
+                              (get-text-property
+                               (point) 'gnus-group)))
+                  (and topic
+                       (equal topic
+                              (get-text-property
+                               (point) 'gnus-topic))))
+          (throw 'position (point)))
+        (forward-line 1))
+      nil)))
+
+(defun bs-gnus--update-refresh-group ()
+  "Rebuild the live Group buffer from locally updated Gnus state."
+  (when (and (boundp 'gnus-group-buffer)
+             (buffer-live-p (get-buffer gnus-group-buffer)))
+    (with-current-buffer gnus-group-buffer
+      (let* ((identity
+              (bs-gnus--update-group-identity-at
+               (current-buffer) (point)))
+             (windows (get-buffer-window-list (current-buffer) nil t))
+             (states
+              (mapcar
+               (lambda (window)
+                 (append
+                  (list window)
+                  (bs-gnus--update-group-identity-at
+                   (current-buffer) (window-start window))
+                  (list (window-hscroll window))))
+               windows)))
+        (gnus-group-list-groups
+         (car gnus-group-list-mode)
+         (cdr gnus-group-list-mode))
+        (when-let* ((position
+                     (bs-gnus--update-find-group-identity
+                      (car identity) (cadr identity))))
+          (goto-char position))
+        (dolist (state states)
+          (pcase-let ((`(,window ,group ,topic ,hscroll) state))
+            (when (and (window-live-p window)
+                       (eq (window-buffer window) (current-buffer)))
+              (when-let* ((position
+                           (bs-gnus--update-find-group-identity
+                            group topic)))
+                (set-window-start window position))
+              (set-window-hscroll window hscroll))))))))
+
+(defun bs-gnus--update-finish-source
+    (source stage worker-errors)
+  "Finish SOURCE application from STAGE with WORKER-ERRORS."
+  (let ((errors
+         (nconc
+          (copy-sequence worker-errors)
+          (nreverse
+           (gethash source bs-gnus--update-apply-errors)))))
+    (remhash source bs-gnus--update-apply-errors)
+    (remhash source bs-gnus--update-progress)
+    (condition-case err
+        (bs-gnus--update-refresh-group)
+      (error
+       (push (error-message-string err) errors)))
+    (if errors
+        (bs-gnus--update-record-failure source errors)
+      (bs-gnus--update-record-success source))
+    (bs-gnus--update-delete-stage stage)
+    (bs-gnus--update-force-header)))
+
+(defun bs-gnus--update-apply-operation (operation)
+  "Apply one staged update OPERATION."
+  (pcase operation
+    (`(metadata ,source ,method ,stage ,plan)
+     (bs-gnus--update-apply-metadata
+      source method stage plan))
+    (`(body ,source ,method ,stage ,group ,article)
+     (bs-gnus--update-copy-body
+      source method stage group article))
+    (`(finish-group ,source ,method ,stage ,plan)
+     (bs-gnus--update-finish-group
+      source method stage plan))
+    (`(finish-source ,source ,stage ,errors)
+     (bs-gnus--update-finish-source
+      source stage errors))))
+
+(defun bs-gnus--update-schedule-apply ()
+  "Schedule the next idle slice that applies staged update data."
+  (unless (timerp bs-gnus--update-apply-timer)
+    (setq bs-gnus--update-apply-timer
+          (run-with-idle-timer
+           0.05 nil #'bs-gnus--update-apply-slice))))
+
+(defun bs-gnus--update-apply-slice ()
+  "Apply staged update operations within a short time budget."
+  (setq bs-gnus--update-apply-timer nil)
+  (let ((deadline (+ (float-time)
+                     bs-gnus--update-apply-time-budget)))
+    (while (and bs-gnus--update-apply-queue
+                (< (float-time) deadline)
+                (not (input-pending-p)))
+      (let* ((operation (pop bs-gnus--update-apply-queue))
+             (source (nth 1 operation)))
+        (condition-case err
+            (bs-gnus--update-apply-operation operation)
+          (error
+           (puthash
+            source
+            (cons (error-message-string err)
+                  (gethash source bs-gnus--update-apply-errors))
+            bs-gnus--update-apply-errors)))
+        (setq bs-gnus--update-apply-done
+              (1+ bs-gnus--update-apply-done)))))
+  (if bs-gnus--update-apply-queue
+      (bs-gnus--update-schedule-apply)
+    (setq bs-gnus--update-apply-done 0
+          bs-gnus--update-apply-total 0))
+  (bs-gnus--update-force-header))
+
+(defun bs-gnus--update-enqueue-result (result)
+  "Queue local application operations for worker RESULT."
+  (let ((source (plist-get result :source))
+        (method (plist-get result :method))
+        (stage (plist-get result :stage))
+        operations)
+    (dolist (original-plan (plist-get result :groups))
+      (let ((plan
+             (plist-put original-plan :available-headers nil)))
+        (push (list 'metadata source method stage plan)
+              operations)
+        (dolist (article (plist-get plan :fetched-bodies))
+          (push (list 'body source method stage
+                      (plist-get plan :group) article)
+                operations))
+        (push (list 'finish-group source method stage plan)
+              operations)))
+    (push (list 'finish-source source stage
+                (plist-get result :errors))
+          operations)
+    (setq operations (nreverse operations)
+          bs-gnus--update-apply-total
+          (+ bs-gnus--update-apply-total
+             (length operations))
+          bs-gnus--update-apply-queue
+          (nconc bs-gnus--update-apply-queue operations))
+    (bs-gnus--update-schedule-apply)
+    (bs-gnus--update-force-header)))
+
+(defun bs-gnus--update-install-group-binding ()
+  "Install the nonblocking Group `g' binding when enabled."
+  (when (and bs-gnus--update-enabled
+             (boundp 'gnus-group-mode-map))
+    (unless bs-gnus--update-group-binding-saved-p
+      (setq bs-gnus--update-original-group-g-binding
+            (lookup-key gnus-group-mode-map (kbd "g"))
+            bs-gnus--update-group-binding-saved-p t))
+    (define-key gnus-group-mode-map (kbd "g") #'bs-gnus-update)))
+
+(defun bs-gnus--update-restore-group-binding ()
+  "Restore the Group binding replaced by the update component."
+  (when (and bs-gnus--update-group-binding-saved-p
+             (boundp 'gnus-group-mode-map))
+    (define-key gnus-group-mode-map (kbd "g")
+                bs-gnus--update-original-group-g-binding))
+  (setq bs-gnus--update-original-group-g-binding nil
+        bs-gnus--update-group-binding-saved-p nil))
+
+(defun bs-gnus--update-start-initial ()
+  "Start the first background update of the current Gnus session."
+  (setq bs-gnus--update-start-timer nil)
+  (when (and bs-gnus--update-enabled (gnus-alive-p))
+    (bs-gnus-update)))
+
+(defun bs-gnus--update-start ()
+  "Start timers for one active Gnus session."
+  (bs-gnus--update-cancel-timer bs-gnus--update-start-timer)
+  (bs-gnus--update-cancel-timer bs-gnus--update-header-timer)
+  (setq bs-gnus--update-header-timer
+        (run-at-time 0 30 #'bs-gnus--update-force-header)
+        bs-gnus--update-start-timer
+        (run-with-idle-timer
+         0.1 nil #'bs-gnus--update-start-initial)))
+
+(defun bs-gnus--update-stop ()
+  "Stop all background update work owned by the current Gnus session."
+  (dolist (timer (list bs-gnus--update-start-timer
+                       bs-gnus--update-periodic-timer
+                       bs-gnus--update-header-timer
+                       bs-gnus--update-apply-timer))
+    (bs-gnus--update-cancel-timer timer))
+  (setq bs-gnus--update-start-timer nil
+        bs-gnus--update-periodic-timer nil
+        bs-gnus--update-header-timer nil
+        bs-gnus--update-apply-timer nil
+        bs-gnus--update-next-time nil)
+  (maphash
+   (lambda (_source timer)
+     (bs-gnus--update-cancel-timer timer))
+   bs-gnus--update-retry-timers)
+  (clrhash bs-gnus--update-retry-timers)
+  (maphash
+   (lambda (_source process)
+     (bs-gnus--update-cancel-timer
+      (process-get process 'bs-gnus-watchdog))
+     (set-process-sentinel process #'ignore)
+     (when (process-live-p process)
+       (delete-process process))
+     (bs-gnus--update-delete-stage
+      (process-get process 'bs-gnus-stage))
+     (dolist (buffer (list (process-buffer process)
+                           (process-get process 'bs-gnus-stderr)))
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))))
+   bs-gnus--update-processes)
+  (clrhash bs-gnus--update-processes)
+  (let (stages)
+    (dolist (operation bs-gnus--update-apply-queue)
+      (when-let* ((stage
+                   (pcase operation
+                     (`(metadata ,_ ,_ ,value . ,_) value)
+                     (`(body ,_ ,_ ,value . ,_) value)
+                     (`(finish-group ,_ ,_ ,value . ,_) value)
+                     (`(finish-source ,_ ,value . ,_) value))))
+        (cl-pushnew stage stages :test #'equal)))
+    (mapc #'bs-gnus--update-delete-stage stages))
+  (setq bs-gnus--update-apply-queue nil
+        bs-gnus--update-apply-done 0
+        bs-gnus--update-apply-total 0)
+  (dolist (table (list bs-gnus--update-progress
+                       bs-gnus--update-failures
+                       bs-gnus--update-retry-counts
+                       bs-gnus--update-imported-bodies
+                       bs-gnus--update-apply-errors))
+    (clrhash table))
+  (bs-gnus--update-force-header))
+
+;;;###autoload
+(defun bs-gnus-update-enable ()
+  "Enable nonblocking background updates while Gnus is active."
+  (interactive)
+  (unless bs-gnus--update-enabled
+    (setq bs-gnus--update-enabled t)
+    (add-hook 'gnus-started-hook #'bs-gnus--update-start)
+    (add-hook 'gnus-exit-gnus-hook #'bs-gnus--update-stop)
+    (with-eval-after-load 'gnus-group
+      (bs-gnus--update-install-group-binding))
+    (when (gnus-alive-p)
+      (bs-gnus--update-start)))
+  t)
+
+;;;###autoload
+(defun bs-gnus-update-disable ()
+  "Disable background Gnus updates and restore the native Group binding."
+  (interactive)
+  (when bs-gnus--update-enabled
+    (setq bs-gnus--update-enabled nil)
+    (remove-hook 'gnus-started-hook #'bs-gnus--update-start)
+    (remove-hook 'gnus-exit-gnus-hook #'bs-gnus--update-stop)
+    (bs-gnus--update-stop)
+    (bs-gnus--update-restore-group-binding)))
 
 ;;;###autoload
 (defun bs-gnus-group-posting-status (group &optional refresh)
@@ -539,9 +1870,9 @@ non-nil."
   (gnus-group-real-name group))
 
 (defun bs-gnus--group-total (group)
-  "Return the estimated number of articles available in GROUP."
+  "Return the highest known article number in GROUP."
   (if-let* ((active (gnus-active group)))
-      (1+ (- (cdr active) (car active)))
+      (cdr active)
     0))
 
 (defun bs-gnus--group-max-indentation-width ()
@@ -702,12 +2033,14 @@ COUNT-WIDTHS contains the unread, total, and indentation widths."
       0)))
 
 (defun bs-gnus--group-header ()
-  "Return right-aligned statistics for the Group header."
-  (let* ((statistics
+  "Return update status and right-aligned Group statistics."
+  (let* ((status (bs-gnus--update-header-status))
+         (statistics
           (bs-gnus--group-root-statistics
            (bs-gnus--group-root-unread)))
          (header
           (concat
+           status
            (bs-gnus--header-right-padding statistics)
            statistics)))
     (add-face-text-property
@@ -1020,14 +2353,6 @@ TRAILING says to add spacing below the row as well."
               '(:eval (bs-gnus--group-header)))
   (add-hook 'kill-buffer-hook
             #'bs-gnus--group-cancel-timers nil t))
-
-(defun bs-gnus--group-buffers ()
-  "Return live Gnus Group buffers."
-  (cl-remove-if-not
-   (lambda (buffer)
-     (with-current-buffer buffer
-       (derived-mode-p 'gnus-group-mode)))
-   (buffer-list)))
 
 ;;;###autoload
 (defun bs-gnus-group-topic-toggle ()
@@ -2268,14 +3593,6 @@ buffer hidden by default, select the current Summary row, and run
         (message "Prepared %d Gnus articles in %s"
                  (length articles)
                  bs-gnus-context-buffer-name)))))
-
-(defun bs-gnus--summary-buffers ()
-  "Return live Gnus Summary buffers."
-  (cl-remove-if-not
-   (lambda (buffer)
-     (with-current-buffer buffer
-       (derived-mode-p 'gnus-summary-mode)))
-   (buffer-list)))
 
 (defun bs-gnus--summary-install ()
   "Install the custom Gnus Summary renderer."
