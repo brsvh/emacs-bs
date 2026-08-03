@@ -173,6 +173,12 @@
   "Face for old articles displayed only to connect a thread."
   :group 'bs-gnus)
 
+(defface bs-gnus-summary-month-face
+  '((t :inherit font-lock-keyword-face
+       :height 1.10 :underline nil :extend t))
+  "Face used for month separators in Summary buffers."
+  :group 'bs-gnus)
+
 (defface bs-gnus-header-face
   '((t :inherit header-line :height 1.0))
   "Base face used for complete Gnus header lines."
@@ -272,6 +278,16 @@
 (defcustom bs-gnus-summary-date-format "%m/%d/%Y %I:%M:%S %p"
   "Format used for article dates in Summary buffers."
   :type 'string
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-summary-month-format "%b %Y"
+  "Format used for root-article month separators in Summary buffers."
+  :type 'string
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-summary-month-line-spacing 0.65
+  "Relative spacing added above and below Summary month separators."
+  :type 'number
   :group 'bs-gnus)
 
 (defcustom bs-gnus-summary-fold-indicator ?▸
@@ -1300,6 +1316,39 @@ of THREAD."
       (push (nreverse current) threads))
     (nreverse threads)))
 
+(defun bs-gnus--summary-root-month (thread)
+  "Return the formatted month of THREAD's root article."
+  (condition-case nil
+      (format-time-string
+       bs-gnus-summary-month-format
+       (date-to-time
+        (mail-header-date
+         (gnus-data-header (car thread)))))
+    (error nil)))
+
+(defun bs-gnus--summary-month-data (threads)
+  "Return month boundaries and preceding breaks for THREADS.
+The car is a hash table mapping root article numbers to month
+labels and first-boundary flags.  The cdr marks root articles after
+which the ordinary thread separator should be omitted."
+  (let ((boundaries (make-hash-table :test #'eql))
+        (breaks (make-hash-table :test #'eql))
+        previous
+        last-month
+        (first-p t))
+    (dolist (thread threads)
+      (let* ((root (car thread))
+             (article (gnus-data-number root))
+             (month (bs-gnus--summary-root-month thread)))
+        (when (and month (not (equal month last-month)))
+          (puthash article (cons month first-p) boundaries)
+          (when previous
+            (puthash previous t breaks))
+          (setq first-p nil
+                last-month month))
+        (setq previous article)))
+    (cons boundaries breaks)))
+
 (defun bs-gnus--summary-thread-unread-count (thread)
   "Return the number of unread articles in THREAD."
   (cl-count-if
@@ -1435,6 +1484,30 @@ Right-align its article count to COUNT-WIDTH columns."
    'bs-gnus-decoration kind
    'gnus-intangible article
    'rear-nonsticky t))
+
+(defun bs-gnus--summary-month-line (title article first-p)
+  "Return a month separator for TITLE anchored to ARTICLE.
+FIRST-P says that this is the first month in the Summary buffer."
+  (let* ((top-spacing
+          (+ bs-gnus-summary-month-line-spacing
+             (if first-p bs-gnus-header-bottom-spacing 0)))
+         (line
+          (bs-gnus--summary-decoration-line
+           (concat "  " title) article 'month-separator))
+         (newline (1- (length line))))
+    (add-text-properties
+     0 (length line)
+     '(face bs-gnus-summary-month-face)
+     line)
+    (add-text-properties
+     0 1
+     `(line-prefix ,(bs-gnus--top-spacing-prefix top-spacing))
+     line)
+    (add-text-properties
+     newline (length line)
+     `(line-spacing ,bs-gnus-summary-month-line-spacing)
+     line)
+    line))
 
 (defun bs-gnus--summary-context-line (header width)
   "Return an unselectable context line for HEADER fitted to WIDTH."
@@ -1645,16 +1718,6 @@ Right-align its article count to COUNT-WIDTH columns."
         (or point-article gnus-current-article)
       (or gnus-current-article point-article))))
 
-(defun bs-gnus--summary-add-header-spacing ()
-  "Add spacing between the Summary header and its first row."
-  (when (< (point-min) (point-max))
-    (add-text-properties
-     (point-min) (1+ (point-min))
-     `(bs-gnus-header-bottom-spacing t
-                                     line-prefix
-                                     ,(bs-gnus--top-spacing-prefix
-                                       bs-gnus-header-bottom-spacing)))))
-
 (defun bs-gnus--summary-decorate ()
   "Decorate the current native Gnus Summary buffer."
   (when (and bs-gnus--summary-enabled
@@ -1670,19 +1733,32 @@ Right-align its article count to COUNT-WIDTH columns."
         (bs-gnus--summary-apply-correspondent-faces)
         (gnus-data-compute-positions)
         (bs-gnus--summary-align-mark-columns)
-        (let ((count-width
-               (bs-gnus--summary-thread-count-width threads)))
+        (let* ((count-width
+                (bs-gnus--summary-thread-count-width threads))
+               (month-data
+                (bs-gnus--summary-month-data threads))
+               (month-boundaries (car month-data))
+               (month-breaks (cdr month-data)))
           (dolist (thread (reverse threads))
             (let ((root (car thread))
                   (last (car (last thread))))
               (goto-char (gnus-data-pos last))
               (forward-line 1)
-              (unless (eobp)
+              (unless (or (eobp)
+                          (gethash
+                           (gnus-data-number root) month-breaks))
                 (insert
                  (bs-gnus--summary-decoration-line
                   "" (gnus-data-number root) 'separator)))
               (goto-char (gnus-data-pos root))
               (beginning-of-line)
+              (when-let* ((month
+                           (gethash
+                            (gnus-data-number root)
+                            month-boundaries)))
+                (insert
+                 (bs-gnus--summary-month-line
+                  (car month) (gnus-data-number root) (cdr month))))
               (insert
                (bs-gnus--summary-decoration-line
                 (bs-gnus--summary-thread-title
@@ -1698,7 +1774,6 @@ Right-align its article count to COUNT-WIDTH columns."
                   context
                   (gnus-data-number root)
                   'thread-context))))))
-        (bs-gnus--summary-add-header-spacing)
         (gnus-data-compute-positions)
         (bs-gnus--summary-apply-context-faces)
         (bs-gnus--summary-apply-folds threads))
