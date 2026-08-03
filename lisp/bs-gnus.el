@@ -173,15 +173,25 @@
   "Face for old articles displayed only to connect a thread."
   :group 'bs-gnus)
 
+(defface bs-gnus-header-face
+  '((t :inherit header-line :height 1.0))
+  "Base face used for complete Gnus header lines."
+  :group 'bs-gnus)
+
+(defface bs-gnus-header-label-face
+  '((t :inherit header-line :weight bold))
+  "Face used for labels in Gnus header lines."
+  :group 'bs-gnus)
+
 (defface bs-gnus-summary-group-face
-  '((t :inherit default :height 1.30 :weight bold))
-  "Face for labels and sources on a Summary overview line."
+  '((t :inherit header-line :weight bold))
+  "Face for sources in a Summary header line."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-group-name-face
-  '((t :inherit bs-gnus-summary-title-face
-       :height 1.30 :weight bold :slant italic))
-  "Face for the group name on a Summary overview line."
+  '((t :inherit font-lock-keyword-face
+       :weight bold :slant italic))
+  "Face for the group name in a Summary header line."
   :group 'bs-gnus)
 
 (defface bs-gnus-summary-group-unread-face
@@ -340,6 +350,11 @@ from the alist use the label `Usenet'."
   :type 'number
   :group 'bs-gnus)
 
+(defcustom bs-gnus-header-bottom-spacing 0.5
+  "Relative line height reserved below Gnus header lines."
+  :type 'number
+  :group 'bs-gnus)
+
 (defconst bs-gnus--summary-line-format "    %U%R%O%z%*  %ub\n"
   "Gnus Summary format used by the custom renderer.")
 
@@ -389,6 +404,12 @@ from the alist use the label `Usenet'."
 
 (defvar-local bs-gnus--group-render-width nil
   "Width used for the latest Group buffer render.")
+
+(defvar-local bs-gnus--group-original-header-line-format nil
+  "Header line format saved before enabling the Group renderer.")
+
+(defvar-local bs-gnus--group-header-line-saved-p nil
+  "Non-nil after saving the Group buffer's header line format.")
 
 (defvar-local bs-gnus--group-resize-timer nil
   "Idle timer used to debounce Group buffer resize rendering.")
@@ -461,6 +482,24 @@ non-nil."
      :align-to
      (- right
         (+ (,(string-pixel-width string)) 2)))))
+
+(defun bs-gnus--header-right-padding (string)
+  "Return pixel-aware padding that right-aligns header STRING."
+  (propertize
+   " " 'display
+   `(space
+     :align-to
+     (- right
+        (+ (,(string-pixel-width string)) 1)))))
+
+(defun bs-gnus--top-spacing-prefix (spacing)
+  "Return a zero-width line prefix adding SPACING above a row."
+  (propertize
+   " " 'display
+   `(space
+     :width 0
+     :height ,(+ 1.0 (max 0 spacing))
+     :ascent 100)))
 
 (defun bs-gnus--group-source (group)
   "Return the concise source label for GROUP."
@@ -628,6 +667,37 @@ COUNT-WIDTHS contains the unread, total, and indentation widths."
       " total"
       'face 'bs-gnus-group-source-face))))
 
+(defun bs-gnus--group-root-unread ()
+  "Return the unread count stored on the root Group Topic."
+  (save-excursion
+    (goto-char (point-min))
+    (catch 'unread
+      (while (not (eobp))
+        (when (zerop
+               (or (get-text-property
+                    (line-beginning-position) 'gnus-topic-level)
+                   -1))
+          (throw
+           'unread
+           (or (get-text-property
+                (line-beginning-position) 'gnus-topic-unread)
+               0)))
+        (forward-line 1))
+      0)))
+
+(defun bs-gnus--group-header ()
+  "Return right-aligned statistics for the Group header."
+  (let* ((statistics
+          (bs-gnus--group-root-statistics
+           (bs-gnus--group-root-unread)))
+         (header
+          (concat
+           (bs-gnus--header-right-padding statistics)
+           statistics)))
+    (add-face-text-property
+     0 (length header) 'bs-gnus-header-face t header)
+    header))
+
 (defun bs-gnus--group-format-topic
     (topic level unread visible width)
   "Format TOPIC at LEVEL with UNREAD articles for WIDTH.
@@ -648,7 +718,7 @@ VISIBLE says whether the topic is expanded."
             (propertize count-string 'face face)))
          (statistics
           (if (zerop level)
-              (bs-gnus--group-root-statistics unread)
+              ""
             (concat
              (propertize
               " (" 'face 'bs-gnus-group-separator-face)
@@ -659,26 +729,19 @@ VISIBLE says whether the topic is expanded."
           (max 0
                (- width
                   (string-width prefix)
-                  (string-width statistics)
-                  (if (zerop level) 4 0))))
+                  (string-width statistics))))
          (title
           (propertize
            (bs-gnus--group-truncate topic title-width)
            'face 'bs-gnus-group-topic-face))
-         (padding
-          (if (zerop level)
-              (bs-gnus--group-right-padding statistics)
-            "")))
-    (let ((line (concat prefix title padding statistics)))
-      (when-let* ((face
-                   (bs-gnus--group-topic-level-face level)))
-        (add-face-text-property
-         (length prefix)
-         (if (zerop level)
-             (+ (length prefix) (length title))
-           (length line))
-         face t line))
-      line)))
+         (line (concat prefix title statistics)))
+    (when-let* ((face
+                 (bs-gnus--group-topic-level-face level)))
+      (add-face-text-property
+       (length prefix)
+       (length line)
+       face t line))
+    line))
 
 (defun bs-gnus--group-preserved-properties ()
   "Return operational properties on the current Group buffer line."
@@ -717,15 +780,15 @@ TRAILING says to add spacing below the row as well."
   (save-excursion
     (goto-char position)
     (let* ((newline (line-end-position))
+           (level
+            (get-text-property position 'gnus-topic-level))
+           (spacing
+            (+ bs-gnus-group-topic-spacing-height
+               (if (and (numberp level) (zerop level))
+                   bs-gnus-header-bottom-spacing
+                 0)))
            (prefix
-            (propertize
-             " "
-             'display
-             `(space
-               :width 0
-               :height
-               ,(+ 1.0 bs-gnus-group-topic-spacing-height)
-               :ascent 100))))
+            (bs-gnus--top-spacing-prefix spacing)))
       (when (< position (point-max))
         (add-text-properties
          position (1+ position)
@@ -844,6 +907,7 @@ TRAILING says to add spacing below the row as well."
           (bs-gnus--group-add-topic-spacing
            (car row) (cdr row))))
       (setq bs-gnus--group-render-width width)
+      (force-mode-line-update)
       (when (and topic (gnus-topic-goto-topic topic))
         (move-to-column column)))))
 
@@ -933,6 +997,11 @@ TRAILING says to add spacing below the row as well."
 
 (defun bs-gnus--group-configure-buffer ()
   "Configure the current Gnus Group buffer."
+  (unless bs-gnus--group-header-line-saved-p
+    (setq bs-gnus--group-original-header-line-format header-line-format
+          bs-gnus--group-header-line-saved-p t))
+  (setq-local header-line-format
+              '(:eval (bs-gnus--group-header)))
   (add-hook 'kill-buffer-hook
             #'bs-gnus--group-cancel-timers nil t))
 
@@ -1013,6 +1082,10 @@ This is an emergency and debugging command, not a minor mode."
       (with-current-buffer buffer
         (bs-gnus--group-cancel-timers)
         (bs-gnus--group-remove-decorations)
+        (setq-local header-line-format
+                    bs-gnus--group-original-header-line-format)
+        (setq bs-gnus--group-original-header-line-format nil
+              bs-gnus--group-header-line-saved-p nil)
         (gnus-group-list-groups
          (car gnus-group-list-mode)
          (cdr gnus-group-list-mode))))))
@@ -1303,60 +1376,57 @@ Right-align its article count to COUNT-WIDTH columns."
      'font-lock-face 'bs-gnus-summary-title-face line)
     line))
 
-(defun bs-gnus--summary-right-padding (string)
-  "Return padding that right-aligns STRING with Summary timestamps."
-  (propertize
-   " "
-   'display
-   `(space
-     :align-to
-     (- right
-        (+ (,(string-pixel-width string)) 1)))))
-
-(defun bs-gnus--summary-group-line (width)
-  "Return a group overview fitted to WIDTH for the current Summary."
-  (let* ((loaded (length gnus-newsgroup-data))
-         (total (bs-gnus--group-total gnus-newsgroup-name))
-         (unread
-          (cl-count-if
-           #'bs-gnus--summary-unread-data-p
-           gnus-newsgroup-data))
-         (unread-string (number-to-string unread))
-         (statistics
-          (concat
-           (propertize
-            unread-string
-            'face
-            (if (> unread 0)
-                'bs-gnus-summary-group-unread-face
-              'bs-gnus-summary-group-empty-unread-face))
-           " unread · "
-           (propertize
-            (number-to-string loaded)
-            'face 'bs-gnus-summary-group-loaded-face)
-           " loaded · "
-           (number-to-string total)
-           " total"))
-         (identity
-          (concat
-           (propertize
-            "  GROUP " 'face 'bs-gnus-summary-group-face)
-           (propertize
-            (bs-gnus--group-display-name gnus-newsgroup-name)
-            'face 'bs-gnus-summary-group-name-face)
-           (propertize
-            (format
-             " (%s)"
-             (bs-gnus--group-source gnus-newsgroup-name))
-            'face 'bs-gnus-summary-group-face)))
-         (identity
-          (bs-gnus--summary-truncate
-           identity
-           (max 0 (- width (string-width statistics) 2)))))
-    (concat
-     identity
-     (bs-gnus--summary-right-padding statistics)
-     statistics)))
+(defun bs-gnus--summary-header ()
+  "Return the Summary identity with right-aligned statistics."
+  (if (not gnus-newsgroup-name)
+      ""
+    (let* ((width (bs-gnus--summary-width))
+           (loaded (length gnus-newsgroup-data))
+           (total (bs-gnus--group-total gnus-newsgroup-name))
+           (unread
+            (cl-count-if
+             #'bs-gnus--summary-unread-data-p
+             gnus-newsgroup-data))
+           (unread-string (number-to-string unread))
+           (statistics
+            (concat
+             (propertize
+              unread-string
+              'face
+              (if (> unread 0)
+                  'bs-gnus-summary-group-unread-face
+                'bs-gnus-summary-group-empty-unread-face))
+             " unread · "
+             (propertize
+              (number-to-string loaded)
+              'face 'bs-gnus-summary-group-loaded-face)
+             " loaded · "
+             (number-to-string total)
+             " total"))
+           (identity
+            (concat
+             (propertize
+              "GROUP " 'face 'bs-gnus-header-label-face)
+             (propertize
+              (bs-gnus--group-display-name gnus-newsgroup-name)
+              'face 'bs-gnus-summary-group-name-face)
+             (propertize
+              (format
+               " (%s)"
+               (bs-gnus--group-source gnus-newsgroup-name))
+              'face 'bs-gnus-summary-group-face)))
+           (identity
+            (bs-gnus--summary-truncate
+             identity
+             (max 0 (- width (string-width statistics) 2))))
+           (header
+            (concat
+             identity
+             (bs-gnus--header-right-padding statistics)
+             statistics)))
+      (add-face-text-property
+       0 (length header) 'bs-gnus-header-face t header)
+      header)))
 
 (defun bs-gnus--summary-decoration-line (string article kind)
   "Return a decoration line containing STRING for ARTICLE and KIND."
@@ -1575,6 +1645,16 @@ Right-align its article count to COUNT-WIDTH columns."
         (or point-article gnus-current-article)
       (or gnus-current-article point-article))))
 
+(defun bs-gnus--summary-add-header-spacing ()
+  "Add spacing between the Summary header and its first row."
+  (when (< (point-min) (point-max))
+    (add-text-properties
+     (point-min) (1+ (point-min))
+     `(bs-gnus-header-bottom-spacing t
+                                     line-prefix
+                                     ,(bs-gnus--top-spacing-prefix
+                                       bs-gnus-header-bottom-spacing)))))
+
 (defun bs-gnus--summary-decorate ()
   "Decorate the current native Gnus Summary buffer."
   (when (and bs-gnus--summary-enabled
@@ -1618,20 +1698,15 @@ Right-align its article count to COUNT-WIDTH columns."
                   context
                   (gnus-data-number root)
                   'thread-context))))))
-        (goto-char (point-min))
-        (when-let* ((first (car gnus-newsgroup-data)))
-          (insert
-           (bs-gnus--summary-decoration-line
-            (concat "\n" (bs-gnus--summary-group-line width) "\n")
-            (gnus-data-number first)
-            'group-summary)))
+        (bs-gnus--summary-add-header-spacing)
         (gnus-data-compute-positions)
         (bs-gnus--summary-apply-context-faces)
         (bs-gnus--summary-apply-folds threads))
       (setq bs-gnus--summary-render-width width
             bs-gnus--summary-rendered t
-            header-line-format nil)
-      (bs-gnus--summary-restore-selection article))))
+            header-line-format '(:eval (bs-gnus--summary-header)))
+      (bs-gnus--summary-restore-selection article)
+      (force-mode-line-update))))
 
 (defun bs-gnus--summary-reset-render-state ()
   "Reset transient render state before Gnus builds a Summary."
@@ -1801,7 +1876,8 @@ Right-align its article count to COUNT-WIDTH columns."
     (setq bs-gnus--summary-fold-state
           (make-hash-table :test #'eql)))
   (setq-local gnus-summary-line-format bs-gnus--summary-line-format)
-  (setq-local header-line-format nil)
+  (setq-local header-line-format
+              '(:eval (bs-gnus--summary-header)))
   (add-to-invisibility-spec 'bs-gnus-fold)
   (add-hook 'kill-buffer-hook
             #'bs-gnus--summary-cancel-timers nil t))
