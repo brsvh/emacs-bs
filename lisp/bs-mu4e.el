@@ -964,8 +964,8 @@ With EDIT, offer to edit the generated query first."
     (mu4e--main-redraw)))
 
 (defface bs-mu4e-headers-title-face
-  '((t :inherit mu4e-header-title-face :weight bold))
-  "Face for thread title lines."
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for thread subjects in Headers buffers."
   :group 'bs-mu4e)
 
 (defface bs-mu4e-headers-correspondent-face
