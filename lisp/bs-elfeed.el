@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dom)
 (require 'elfeed)
 (require 'elfeed-search)
 (require 'shr)
@@ -37,12 +38,14 @@
 
 (defvar shr-inhibit-images)
 (defvar shr-use-fonts)
+(defvar url-current-object)
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
 
 (defvar elfeed-search-entries)
 (defvar elfeed-search-header-function)
 (defvar elfeed-search-print-entry-function)
+(defvar elfeed-show-entry)
 (defvar elfeed-tree--last-update)
 (defvar elfeed-tree-filter)
 (defvar elfeed-tree-header-function)
@@ -57,6 +60,7 @@
 (declare-function elfeed-queue-count-total "elfeed")
 (declare-function elfeed-score-scoring-get-score-from-entry
                   "elfeed-score-scoring")
+(declare-function elfeed-show-entry "elfeed-show" (entry))
 (declare-function elfeed-tree--build-nested "elfeed-tree")
 (declare-function elfeed-tree--collect "elfeed-tree")
 (declare-function elfeed-tree--stats "elfeed-tree")
@@ -64,6 +68,9 @@
 (declare-function outline-invisible-p "outline")
 (declare-function outline-revert-buffer-restore-visibility "outline")
 (declare-function outline-show-all "outline")
+(declare-function notifications-close-notification
+                  "notifications" (id &optional bus))
+(declare-function notifications-notify "notifications" (&rest params))
 
 (defgroup bs-elfeed nil
   "Personal Elfeed extensions."
@@ -244,6 +251,33 @@ entries."
   :type 'natnum
   :group 'bs-elfeed)
 
+(defcustom bs-elfeed-notifications-app-icon 'application-rss+xml
+  "Fallback application icon used for Elfeed notifications.
+
+A symbol names an icon from the desktop icon theme.  A string is
+interpreted as an image file.  Nil requests no application icon."
+  :type '(choice (const :tag "No application icon" nil)
+                 (symbol :tag "Desktop icon name")
+                 (file :tag "Image file"))
+  :group 'bs-elfeed)
+
+(defcustom bs-elfeed-notifications-favicon-cache-directory
+  (locate-user-emacs-file "cache/elfeed/notification-favicons/")
+  "Directory containing persistent Elfeed notification favicons."
+  :type 'directory
+  :group 'bs-elfeed)
+
+(defcustom bs-elfeed-notifications-favicon-cache-expiry
+  (* 90 24 60 60)
+  "Seconds before a cached Elfeed notification favicon expires."
+  :type 'natnum
+  :group 'bs-elfeed)
+
+(defcustom bs-elfeed-notifications-favicon-fetch-timeout 15
+  "Seconds to wait for each Elfeed notification favicon request."
+  :type 'number
+  :group 'bs-elfeed)
+
 (defcustom bs-elfeed-tree-tag-names
   '((emacs . "Emacs")
     (kde . "KDE")
@@ -327,6 +361,31 @@ entries."
 (defvar bs-elfeed-search--original-print-entry-function nil)
 (defvar bs-elfeed--update-timer nil)
 
+(defvar bs-elfeed--notifications-attempted-entry-ids
+  (make-hash-table :test #'equal)
+  "Entry IDs attempted during the current Elfeed update.")
+
+(defvar bs-elfeed--notifications-enabled nil
+  "Non-nil when actionable Elfeed notifications are enabled.")
+
+(defvar bs-elfeed--notifications-favicon-generation 0
+  "Generation identifying relevant asynchronous favicon callbacks.")
+
+(defvar bs-elfeed--notifications-favicon-jobs
+  (make-hash-table :test #'equal)
+  "Active favicon retrievals keyed by normalized feed origins.")
+
+(defvar bs-elfeed--notifications-favicon-waiters
+  (make-hash-table :test #'equal)
+  "Entry IDs waiting for each normalized feed origin favicon.")
+
+(defvar bs-elfeed--notifications-id-to-entry-id nil
+  "Alist mapping desktop notification identifiers to Elfeed entry IDs.")
+
+(defvar bs-elfeed--notifications-sent-entry-ids
+  (make-hash-table :test #'equal)
+  "Entry IDs successfully notified during the current session.")
+
 (defvar-local bs-elfeed-tree--render-width nil)
 (defvar-local bs-elfeed-tree--resize-timer nil)
 (defvar-local bs-elfeed-tree--statistics nil)
@@ -353,6 +412,16 @@ entries."
   buffer
   timer
   completed)
+
+(cl-defstruct
+    (bs-elfeed--favicon-job
+     (:constructor bs-elfeed--make-favicon-job))
+  origin
+  generation
+  stage
+  fallback-p
+  buffer
+  timer)
 
 (defun bs-elfeed--render-html (html)
   "Return HTML rendered as plain text."
@@ -622,6 +691,498 @@ asynchronously when their feed content is too short."
             (run-at-time interval interval
                          #'bs-elfeed--update-if-idle))))
   (bs-elfeed--update-if-idle))
+
+(defun bs-elfeed--notifications-initial-update-complete-p ()
+  "Return non-nil after the initial Elfeed backlog migration."
+  (file-exists-p
+   (expand-file-name "initial-update-complete"
+                     elfeed-db-directory)))
+
+(defun bs-elfeed--notifications-origin (entry)
+  "Return the normalized HTTP origin of ENTRY's feed."
+  (when-let* ((feed (elfeed-entry-feed entry))
+              (feed-url (or (elfeed-feed-url feed)
+                            (elfeed-feed-id feed)))
+              ((stringp feed-url))
+              (url (ignore-errors
+                     (url-generic-parse-url feed-url)))
+              (type (url-type url))
+              ((member type '("http" "https")))
+              ((url-host url)))
+    (setf (url-filename url) "/"
+          (url-target url) nil
+          (url-attributes url) nil
+          (url-user url) nil
+          (url-password url) nil)
+    (url-recreate-url url)))
+
+(defun bs-elfeed--notifications-favicon-file (origin)
+  "Return the persistent favicon file for feed ORIGIN."
+  (expand-file-name
+   (secure-hash 'sha256 origin)
+   bs-elfeed-notifications-favicon-cache-directory))
+
+(defun bs-elfeed--notifications-favicon-current-p (file)
+  "Return non-nil when cached favicon FILE is present and current."
+  (when-let* ((attributes (file-attributes file)))
+    (and (> (file-attribute-size attributes) 0)
+         (< (float-time
+             (time-subtract
+              (current-time)
+              (file-attribute-modification-time attributes)))
+            bs-elfeed-notifications-favicon-cache-expiry))))
+
+(defun bs-elfeed--notifications-write-favicon (file data)
+  "Atomically write favicon DATA to cache FILE and return FILE."
+  (make-directory bs-elfeed-notifications-favicon-cache-directory t)
+  (let ((temporary
+         (make-temp-file
+          (expand-file-name
+           ".favicon-"
+           bs-elfeed-notifications-favicon-cache-directory))))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert data)
+            (let ((coding-system-for-write 'binary))
+              (write-region (point-min) (point-max)
+                            temporary nil 'silent)))
+          (rename-file temporary file t)
+          (setq temporary nil)
+          file)
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+(defun bs-elfeed--notifications-forget (id)
+  "Forget the Elfeed entry associated with notification ID."
+  (setq bs-elfeed--notifications-id-to-entry-id
+        (assq-delete-all
+         id bs-elfeed--notifications-id-to-entry-id)))
+
+(defun bs-elfeed--notifications-mark-read (entry-id)
+  "Mark the Elfeed entry identified by ENTRY-ID as read and save."
+  (when-let* ((entry (elfeed-db-get-entry entry-id)))
+    (elfeed-untag entry 'unread)
+    (condition-case error-data
+        (elfeed-db-save)
+      (error
+       (message "Failed to save Elfeed after marking an entry read: %s"
+                (error-message-string error-data))))
+    (elfeed-search-update :force)
+    entry))
+
+(defun bs-elfeed--notifications-show-buffer (entry-id)
+  "Return an Elfeed Show buffer displaying ENTRY-ID."
+  (cl-find-if
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (and (derived-mode-p 'elfeed-show-mode)
+            elfeed-show-entry
+            (equal entry-id
+                   (elfeed-entry-id elfeed-show-entry)))))
+   (buffer-list)))
+
+(defun bs-elfeed--notifications-read (entry-id)
+  "Open and focus the Elfeed entry identified by ENTRY-ID."
+  (when-let* ((entry
+               (bs-elfeed--notifications-mark-read entry-id)))
+    (require 'elfeed-show)
+    (elfeed-show-entry entry)
+    (when-let* ((buffer
+                 (bs-elfeed--notifications-show-buffer entry-id))
+                (window (get-buffer-window buffer t)))
+      (select-window window)
+      (select-frame-set-input-focus (window-frame window)))))
+
+(defun bs-elfeed--notifications-action (id key)
+  "Apply action KEY to the Elfeed entry associated with notification ID."
+  (when-let* ((entry-id
+               (alist-get
+                id bs-elfeed--notifications-id-to-entry-id)))
+    (unwind-protect
+        (pcase key
+          ((or "default" "read")
+           (bs-elfeed--notifications-read entry-id))
+          ("mark-read"
+           (bs-elfeed--notifications-mark-read entry-id)))
+      (bs-elfeed--notifications-forget id))))
+
+(defun bs-elfeed--notifications-close (id _reason)
+  "Forget the Elfeed entry associated with closed notification ID.
+REASON is ignored."
+  (bs-elfeed--notifications-forget id))
+
+(defun bs-elfeed--notifications-title (entry)
+  "Return ENTRY's feed title for a notification."
+  (let ((feed (elfeed-entry-feed entry)))
+    (bs-elfeed--single-line
+     (and feed (elfeed-feed-title feed))
+     (if feed (elfeed-feed-id feed) "Elfeed"))))
+
+(defun bs-elfeed--notifications-body (entry)
+  "Return ENTRY's title for a notification."
+  (bs-elfeed--single-line
+   (elfeed-entry-title entry) "(Untitled)"))
+
+(defun bs-elfeed--notifications-send (entry-id favicon-file)
+  "Notify about ENTRY-ID using FAVICON-FILE when still eligible."
+  (when-let* (((and bs-elfeed--notifications-enabled
+                    (not (gethash
+                          entry-id
+                          bs-elfeed--notifications-sent-entry-ids))))
+              (entry (elfeed-db-get-entry entry-id))
+              ((memq 'unread (elfeed-entry-tags entry))))
+    (condition-case error-data
+        (when-let* ((id
+                     (notifications-notify
+                      :title (bs-elfeed--notifications-title entry)
+                      :body (bs-elfeed--notifications-body entry)
+                      :actions '("read" "Read"
+                                 "mark-read" "Mark As Read"
+                                 "default" "Read")
+                      :on-action #'bs-elfeed--notifications-action
+                      :on-close #'bs-elfeed--notifications-close
+                      :app-icon bs-elfeed-notifications-app-icon
+                      :image-path favicon-file
+                      :app-name "Elfeed"
+                      :category "news")))
+          (puthash entry-id t
+                   bs-elfeed--notifications-sent-entry-ids)
+          (setq bs-elfeed--notifications-id-to-entry-id
+                (cons
+                 (cons id entry-id)
+                 (assq-delete-all
+                  id bs-elfeed--notifications-id-to-entry-id))))
+      (error
+       (message "Failed to notify about Elfeed entry %s: %s"
+                (bs-elfeed--notifications-body entry)
+                (error-message-string error-data))))))
+
+(defun bs-elfeed--notifications-favicon-job-current-p (job)
+  "Return non-nil when JOB belongs to the active favicon generation."
+  (and bs-elfeed--notifications-enabled
+       (= (bs-elfeed--favicon-job-generation job)
+          bs-elfeed--notifications-favicon-generation)
+       (eq job
+           (gethash
+            (bs-elfeed--favicon-job-origin job)
+            bs-elfeed--notifications-favicon-jobs))))
+
+(defun bs-elfeed--notifications-favicon-stop-request (job)
+  "Stop the active network request and timer belonging to JOB."
+  (when-let* ((timer (bs-elfeed--favicon-job-timer job)))
+    (cancel-timer timer))
+  (when-let* ((buffer (bs-elfeed--favicon-job-buffer job)))
+    (when (buffer-live-p buffer)
+      (when-let* ((process (get-buffer-process buffer)))
+        (delete-process process))
+      (kill-buffer buffer)))
+  (setf (bs-elfeed--favicon-job-buffer job) nil
+        (bs-elfeed--favicon-job-timer job) nil))
+
+(defun bs-elfeed--notifications-favicon-response-success-p ()
+  "Return non-nil when the current URL buffer has a successful response."
+  (and (numberp url-http-response-status)
+       (<= 200 url-http-response-status)
+       (< url-http-response-status 300)
+       (integer-or-marker-p url-http-end-of-headers)))
+
+(defun bs-elfeed--notifications-favicon-content-type ()
+  "Return the current URL response's normalized content type."
+  (when (integer-or-marker-p url-http-end-of-headers)
+    (save-excursion
+      (goto-char (point-min))
+      (let ((case-fold-search t))
+        (when (re-search-forward
+               "^Content-Type:[ \t]*\\([^;\r\n]+\\)"
+               url-http-end-of-headers t)
+          (downcase (string-trim (match-string 1))))))))
+
+(defun bs-elfeed--notifications-favicon-response-data ()
+  "Return the body data from the current successful URL response."
+  (when (bs-elfeed--notifications-favicon-response-success-p)
+    (buffer-substring-no-properties
+     url-http-end-of-headers (point-max))))
+
+(defun bs-elfeed--notifications-favicon-image-p (data content-type)
+  "Return non-nil when DATA or CONTENT-TYPE describes an image."
+  (and (stringp data)
+       (> (length data) 0)
+       (or (ignore-errors (image-type-from-data data))
+           (and content-type
+                (string-prefix-p "image/" content-type)))))
+
+(defun bs-elfeed--notifications-favicon-homepage-base (origin)
+  "Return the response URL used to resolve icons for ORIGIN."
+  (or (and (boundp 'url-current-object)
+           url-current-object
+           (ignore-errors
+             (url-recreate-url url-current-object)))
+      origin))
+
+(defun bs-elfeed--notifications-favicon-link (origin)
+  "Return the preferred favicon URL from the current ORIGIN response."
+  (when (bs-elfeed--notifications-favicon-response-success-p)
+    (condition-case nil
+        (save-restriction
+          (narrow-to-region url-http-end-of-headers (point-max))
+          (let ((document
+                 (libxml-parse-html-region (point-min) (point-max)))
+                (base
+                 (bs-elfeed--notifications-favicon-homepage-base
+                  origin)))
+            (catch 'favicon
+              (dolist (link (dom-by-tag document 'link))
+                (let ((href (dom-attr link 'href))
+                      (rel (downcase
+                            (or (dom-attr link 'rel) ""))))
+                  (when (and (stringp href)
+                             (not (string-empty-p href))
+                             (member "icon"
+                                     (split-string rel nil t)))
+                    (let ((icon-url
+                           (elfeed-update-location base href)))
+                      (when (string-match-p
+                             "\\`https?://" icon-url)
+                        (throw 'favicon icon-url)))))))))
+      (error nil))))
+
+(defun bs-elfeed--notifications-favicon-fallback-url (origin)
+  "Return the conventional favicon URL below ORIGIN."
+  (elfeed-update-location origin "favicon.ico"))
+
+(defun bs-elfeed--notifications-favicon-complete (job data)
+  "Complete JOB with favicon DATA and notify its waiting entries."
+  (when (bs-elfeed--notifications-favicon-job-current-p job)
+    (let* ((origin (bs-elfeed--favicon-job-origin job))
+           (entry-ids
+            (gethash
+             origin bs-elfeed--notifications-favicon-waiters))
+           (file
+            (and data
+                 (condition-case error-data
+                     (bs-elfeed--notifications-write-favicon
+                      (bs-elfeed--notifications-favicon-file origin)
+                      data)
+                   (error
+                    (message "Failed to cache Elfeed favicon for %s: %s"
+                             origin
+                             (error-message-string error-data))
+                    nil)))))
+      (remhash origin bs-elfeed--notifications-favicon-jobs)
+      (remhash origin bs-elfeed--notifications-favicon-waiters)
+      (dolist (entry-id (nreverse entry-ids))
+        (bs-elfeed--notifications-send entry-id file)))))
+
+(defun bs-elfeed--notifications-favicon-start-fetch
+    (job url stage fallback-p)
+  "Fetch URL for JOB at STAGE.
+FALLBACK-P is non-nil when URL is the conventional favicon path."
+  (setf (bs-elfeed--favicon-job-stage job) stage
+        (bs-elfeed--favicon-job-fallback-p job) fallback-p)
+  (condition-case error-data
+      (let ((buffer
+             (url-retrieve
+              url #'bs-elfeed--notifications-favicon-callback
+              (list job) t t)))
+        (unless (buffer-live-p buffer)
+          (error "URL retrieval did not create a buffer"))
+        (setf (bs-elfeed--favicon-job-buffer job) buffer
+              (bs-elfeed--favicon-job-timer job)
+              (run-at-time
+               bs-elfeed-notifications-favicon-fetch-timeout nil
+               #'bs-elfeed--notifications-favicon-timeout
+               job buffer)))
+    (error
+     (message "Failed to fetch Elfeed favicon from %s: %s"
+              url (error-message-string error-data))
+     (bs-elfeed--notifications-favicon-stop-request job)
+     (bs-elfeed--notifications-favicon-stage-failed job))))
+
+(defun bs-elfeed--notifications-favicon-stage-failed (job)
+  "Advance or finish JOB after its current stage fails."
+  (when (bs-elfeed--notifications-favicon-job-current-p job)
+    (pcase (bs-elfeed--favicon-job-stage job)
+      ('homepage
+       (bs-elfeed--notifications-favicon-start-fetch
+        job
+        (bs-elfeed--notifications-favicon-fallback-url
+         (bs-elfeed--favicon-job-origin job))
+        'icon t))
+      ('icon
+       (if (bs-elfeed--favicon-job-fallback-p job)
+           (bs-elfeed--notifications-favicon-complete job nil)
+         (bs-elfeed--notifications-favicon-start-fetch
+          job
+          (bs-elfeed--notifications-favicon-fallback-url
+           (bs-elfeed--favicon-job-origin job))
+          'icon t))))))
+
+(defun bs-elfeed--notifications-favicon-callback (_status job)
+  "Process the current URL response for favicon JOB.
+STATUS is ignored because the HTTP status is inspected directly."
+  (let* ((buffer (current-buffer))
+         (current-p
+          (and (bs-elfeed--notifications-favicon-job-current-p job)
+               (eq buffer (bs-elfeed--favicon-job-buffer job))))
+         (stage (bs-elfeed--favicon-job-stage job))
+         icon-url
+         content-type
+         data)
+    (when current-p
+      (pcase stage
+        ('homepage
+         (setq icon-url
+               (bs-elfeed--notifications-favicon-link
+                (bs-elfeed--favicon-job-origin job))))
+        ('icon
+         (setq content-type
+               (bs-elfeed--notifications-favicon-content-type)
+               data
+               (bs-elfeed--notifications-favicon-response-data)))))
+    (when (eq buffer (bs-elfeed--favicon-job-buffer job))
+      (when-let* ((timer (bs-elfeed--favicon-job-timer job)))
+        (cancel-timer timer))
+      (setf (bs-elfeed--favicon-job-buffer job) nil
+            (bs-elfeed--favicon-job-timer job) nil))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))
+    (when current-p
+      (pcase stage
+        ('homepage
+         (if icon-url
+             (let ((fallback-url
+                    (bs-elfeed--notifications-favicon-fallback-url
+                     (bs-elfeed--favicon-job-origin job))))
+               (bs-elfeed--notifications-favicon-start-fetch
+                job icon-url 'icon (equal icon-url fallback-url)))
+           (bs-elfeed--notifications-favicon-stage-failed job)))
+        ('icon
+         (if (bs-elfeed--notifications-favicon-image-p
+              data content-type)
+             (bs-elfeed--notifications-favicon-complete job data)
+           (bs-elfeed--notifications-favicon-stage-failed job)))))))
+
+(defun bs-elfeed--notifications-favicon-timeout (job buffer)
+  "Handle a favicon JOB timing out in response BUFFER."
+  (when (and (bs-elfeed--notifications-favicon-job-current-p job)
+             (eq buffer (bs-elfeed--favicon-job-buffer job)))
+    (bs-elfeed--notifications-favicon-stop-request job)
+    (bs-elfeed--notifications-favicon-stage-failed job)))
+
+(defun bs-elfeed--notifications-prepare (entry)
+  "Notify about ENTRY after resolving its feed favicon."
+  (let ((entry-id (elfeed-entry-id entry)))
+    (if-let* ((origin (bs-elfeed--notifications-origin entry))
+              (file (bs-elfeed--notifications-favicon-file origin)))
+        (cond
+         ((bs-elfeed--notifications-favicon-current-p file)
+          (bs-elfeed--notifications-send entry-id file))
+         ((gethash origin bs-elfeed--notifications-favicon-jobs)
+          (cl-pushnew
+           entry-id
+           (gethash
+            origin bs-elfeed--notifications-favicon-waiters)
+           :test #'equal))
+         (t
+          (puthash
+           origin (list entry-id)
+           bs-elfeed--notifications-favicon-waiters)
+          (let ((job
+                 (bs-elfeed--make-favicon-job
+                  :origin origin
+                  :generation
+                  bs-elfeed--notifications-favicon-generation)))
+            (puthash origin job
+                     bs-elfeed--notifications-favicon-jobs)
+            (bs-elfeed--notifications-favicon-start-fetch
+             job origin 'homepage nil))))
+      (bs-elfeed--notifications-send entry-id nil))))
+
+(defun bs-elfeed--notifications-consider-entry (entry)
+  "Queue a notification for ENTRY when it is eligible."
+  (let ((entry-id (elfeed-entry-id entry)))
+    (when (and bs-elfeed--notifications-enabled
+               (bs-elfeed--notifications-initial-update-complete-p)
+               (memq 'unread (elfeed-entry-tags entry))
+               (not (gethash
+                     entry-id
+                     bs-elfeed--notifications-sent-entry-ids))
+               (not (gethash
+                     entry-id
+                     bs-elfeed--notifications-attempted-entry-ids)))
+      (puthash entry-id t
+               bs-elfeed--notifications-attempted-entry-ids)
+      (bs-elfeed--notifications-prepare entry))))
+
+(defun bs-elfeed--notifications-update-started ()
+  "Clear notification attempts at the beginning of an Elfeed update."
+  (clrhash bs-elfeed--notifications-attempted-entry-ids))
+
+(defun bs-elfeed--notifications-scan-unread (&rest _)
+  "Consider all unread Elfeed entries for notification delivery."
+  (when (and bs-elfeed--notifications-enabled
+             (bs-elfeed--notifications-initial-update-complete-p))
+    (dolist (entry (elfeed-search-entries "+unread"))
+      (bs-elfeed--notifications-consider-entry entry))))
+
+(defun bs-elfeed--notifications-stop-favicon-jobs ()
+  "Stop and forget every active favicon retrieval."
+  (maphash
+   (lambda (_origin job)
+     (bs-elfeed--notifications-favicon-stop-request job))
+   bs-elfeed--notifications-favicon-jobs)
+  (clrhash bs-elfeed--notifications-favicon-jobs)
+  (clrhash bs-elfeed--notifications-favicon-waiters))
+
+;;;###autoload
+(defun bs-elfeed-notifications-disable ()
+  "Disable actionable Elfeed desktop notifications."
+  (interactive)
+  (when bs-elfeed--notifications-enabled
+    (setq bs-elfeed--notifications-enabled nil)
+    (cl-incf bs-elfeed--notifications-favicon-generation)
+    (remove-hook
+     'elfeed-new-entry-hook
+     #'bs-elfeed--notifications-consider-entry)
+    (remove-hook
+     'elfeed-update-init-hook
+     #'bs-elfeed--notifications-update-started)
+    (remove-hook
+     'elfeed-update-hook
+     #'bs-elfeed--notifications-scan-unread)
+    (bs-elfeed--notifications-stop-favicon-jobs)
+    (dolist (entry
+             (copy-sequence
+              bs-elfeed--notifications-id-to-entry-id))
+      (ignore-errors
+        (notifications-close-notification (car entry))))
+    (setq bs-elfeed--notifications-id-to-entry-id nil)
+    (clrhash bs-elfeed--notifications-attempted-entry-ids)
+    (clrhash bs-elfeed--notifications-sent-entry-ids)))
+
+;;;###autoload
+(defun bs-elfeed-notifications-enable ()
+  "Enable actionable notifications and start periodic Elfeed updates."
+  (interactive)
+  (require 'notifications)
+  (unless bs-elfeed--notifications-enabled
+    (setq bs-elfeed--notifications-enabled t)
+    (clrhash bs-elfeed--notifications-attempted-entry-ids)
+    (clrhash bs-elfeed--notifications-sent-entry-ids)
+    (add-hook
+     'elfeed-new-entry-hook
+     #'bs-elfeed--notifications-consider-entry t)
+    (add-hook
+     'elfeed-update-init-hook
+     #'bs-elfeed--notifications-update-started)
+    (add-hook
+     'elfeed-update-hook
+     #'bs-elfeed--notifications-scan-unread t)
+    (bs-elfeed--notifications-scan-unread)
+    (bs-elfeed--ensure-update-timer))
+  t)
 
 (defun bs-elfeed--tree-tag-name (tag)
   "Return the display name for Elfeed TAG."
