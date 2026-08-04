@@ -832,37 +832,6 @@ standard behaviors."
           (mapcar (lambda (article) (gethash article records))
                   articles))))
 
-(defun bs-gnus--update-worker-avatar-current-p (file)
-  "Return non-nil when cached avatar FILE is present and current."
-  (when-let* ((attributes (file-attributes file)))
-    (and (> (file-attribute-size attributes) 0)
-         (< (float-time
-             (time-subtract
-              (current-time)
-              (file-attribute-modification-time attributes)))
-            bs-gnus--update-worker-avatar-cache-expiry))))
-
-(defun bs-gnus--update-worker-write-avatar (file data)
-  "Atomically write avatar DATA to cache FILE."
-  (make-directory bs-gnus--update-worker-avatar-cache-directory t)
-  (let ((temporary
-         (make-temp-file
-          (expand-file-name
-           ".avatar-"
-           bs-gnus--update-worker-avatar-cache-directory))))
-    (unwind-protect
-        (progn
-          (with-temp-buffer
-            (set-buffer-multibyte nil)
-            (insert data)
-            (let ((coding-system-for-write 'binary))
-              (write-region (point-min) (point-max)
-                            temporary nil 'silent)))
-          (rename-file temporary file t)
-          (setq temporary nil))
-      (when (and temporary (file-exists-p temporary))
-        (delete-file temporary)))))
-
 (defun bs-gnus--update-worker-avatar (address)
   "Return a cached Gravatar file for ADDRESS, retrieving it if needed."
   (when (and (stringp address)
@@ -870,10 +839,10 @@ standard behaviors."
              bs-gnus--update-worker-avatar-cache-directory)
     (let* ((normalized (downcase (string-trim address)))
            (file
-            (expand-file-name
-             (secure-hash 'sha256 normalized)
-             bs-gnus--update-worker-avatar-cache-directory)))
-      (if (bs-gnus--update-worker-avatar-current-p file)
+            (bs-notifications-cache-file
+             bs-gnus--update-worker-avatar-cache-directory normalized)))
+      (if (bs-notifications-cache-current-p
+           file bs-gnus--update-worker-avatar-cache-expiry)
           file
         (when (file-exists-p file)
           (delete-file file))
@@ -892,7 +861,8 @@ standard behaviors."
                       (and (not (eq image 'error))
                            (plist-get (cdr image) :data))))
                 (when (stringp data)
-                  (bs-gnus--update-worker-write-avatar file data)
+                  (bs-notifications-write-cache-data
+                   file data ".avatar-")
                   file)))
           (error nil))))))
 
@@ -2337,43 +2307,6 @@ non-nil."
       (window-body-width window)
     bs-gnus-group-fallback-width))
 
-(defun bs-gnus--group-truncate (string width)
-  "Truncate STRING to WIDTH columns with an ASCII ellipsis."
-  (cond
-   ((<= width 0) "")
-   ((<= (string-width string) width) string)
-   (t
-    (truncate-string-to-width
-     string width 0 nil (and (> width 3) "...")))))
-
-(defun bs-gnus--group-right-padding (string)
-  "Return padding that right-aligns STRING with a two-column margin."
-  (propertize
-   " "
-   'display
-   `(space
-     :align-to
-     (- right
-        (+ (,(string-pixel-width string)) 2)))))
-
-(defun bs-gnus--header-right-padding (string)
-  "Return pixel-aware padding that right-aligns header STRING."
-  (propertize
-   " " 'display
-   `(space
-     :align-to
-     (- right
-        (+ (,(string-pixel-width string)) 1)))))
-
-(defun bs-gnus--top-spacing-prefix (spacing)
-  "Return a zero-width line prefix adding SPACING above a row."
-  (propertize
-   " " 'display
-   `(space
-     :width 0
-     :height ,(+ 1.0 (max 0 spacing))
-     :ascent 100)))
-
 (defun bs-gnus--group-source (group)
   "Return the concise source label for GROUP."
   (let* ((method (gnus-find-method-for-group group))
@@ -2497,12 +2430,12 @@ COUNT-WIDTHS contains the unread, total, and indentation widths."
                   4)))
          (name
           (propertize
-           (bs-gnus--group-truncate
+           (bs-truncate-string
             (bs-gnus--group-display-name group)
             name-width)
            'face 'bs-gnus-group-name-face))
          (padding
-          (bs-gnus--group-right-padding source)))
+          (bs-right-padding source 2)))
     (concat prefix name padding source)))
 
 (defun bs-gnus--group-topic-level-face (level)
@@ -2567,7 +2500,7 @@ COUNT-WIDTHS contains the unread, total, and indentation widths."
          (header
           (concat
            status
-           (bs-gnus--header-right-padding statistics)
+           (bs-right-padding statistics)
            statistics)))
     (add-face-text-property
      0 (length header) 'bs-gnus-header-face t header)
@@ -2607,7 +2540,7 @@ VISIBLE says whether the topic is expanded."
                   (string-width statistics))))
          (title
           (propertize
-           (bs-gnus--group-truncate topic title-width)
+           (bs-truncate-string topic title-width)
            'face 'bs-gnus-group-topic-face))
          (line (concat prefix title statistics)))
     (when-let* ((face
@@ -2663,7 +2596,7 @@ TRAILING says to add spacing below the row as well."
                    bs-gnus-header-bottom-spacing
                  0)))
            (prefix
-            (bs-gnus--top-spacing-prefix spacing)))
+            (bs-top-spacing-prefix spacing)))
       (when (< position (point-max))
         (add-text-properties
          position (1+ position)
@@ -2964,23 +2897,6 @@ This is an emergency and debugging command, not a minor mode."
   (with-eval-after-load 'gnus-topic
     (bs-gnus--group-install)))
 
-(defun bs-gnus--summary-sanitize-string (string)
-  "Return STRING without control characters that break one-line layout."
-  (string-trim
-   (replace-regexp-in-string
-    "[[:cntrl:]\n\r\t]+"
-    " "
-    (if (stringp string) string ""))))
-
-(defun bs-gnus--summary-truncate (string width)
-  "Truncate STRING to WIDTH columns with an ASCII ellipsis."
-  (cond
-   ((<= width 0) "")
-   ((<= (string-width string) width) string)
-   (t
-    (truncate-string-to-width
-     string width 0 nil (and (> width 3) "...")))))
-
 (defun bs-gnus--summary-space (width &optional face)
   "Return spacing WIDTH character widths wide using optional FACE."
   (let* ((width (max 0.0 width))
@@ -3026,7 +2942,7 @@ This is an emergency and debugging command, not a minor mode."
                (string-prefix-p "\"" name)
                (string-suffix-p "\"" name))
       (setq name (string-trim (substring name 1 -1))))
-    (bs-gnus--summary-sanitize-string
+    (bs-sanitize-single-line
      (or (and name (not (string-empty-p name)) name)
          (and (stringp email) email)
          address
@@ -3040,7 +2956,7 @@ This is an emergency and debugging command, not a minor mode."
          bs-gnus-summary-date-format
          (date-to-time date))
       (error
-       (bs-gnus--summary-sanitize-string date)))))
+       (bs-sanitize-single-line date)))))
 
 (defun bs-gnus--summary-unread-data-p (data)
   "Return non-nil when DATA represents an unread article."
@@ -3284,8 +3200,8 @@ Right-align its article count to COUNT-WIDTH columns."
            (bs-gnus--summary-space padding-width count-face)))
          (reserved (+ count-width (* 2 padding-width) 1))
          (subject
-          (bs-gnus--summary-truncate
-           (bs-gnus--summary-sanitize-string
+          (bs-truncate-string
+           (bs-sanitize-single-line
             (mail-header-subject header))
            (max 0 (floor (- width reserved)))))
          (line (concat count " " subject)))
@@ -3342,13 +3258,13 @@ Right-align its article count to COUNT-WIDTH columns."
                (bs-gnus--group-source gnus-newsgroup-name))
               'face 'bs-gnus-summary-group-face)))
            (identity
-            (bs-gnus--summary-truncate
+            (bs-truncate-string
              identity
              (max 0 (- width (string-width statistics) 2))))
            (header
             (concat
              identity
-             (bs-gnus--header-right-padding statistics)
+             (bs-right-padding statistics)
              statistics)))
       (add-face-text-property
        0 (length header) 'bs-gnus-header-face t header)
@@ -3378,7 +3294,7 @@ FIRST-P says that this is the first month in the Summary buffer."
      line)
     (add-text-properties
      0 1
-     `(line-prefix ,(bs-gnus--top-spacing-prefix top-spacing))
+     `(line-prefix ,(bs-top-spacing-prefix top-spacing))
      line)
     (add-text-properties
      newline (length line)
@@ -3403,7 +3319,7 @@ FIRST-P says that this is the first month in the Summary buffer."
               (string-width prefix)
               (string-width date)
               1)))
-         (name (bs-gnus--summary-truncate name available))
+         (name (bs-truncate-string name available))
          (padding
           (make-string
            (max 1 (- available (string-width name)))
@@ -3898,7 +3814,7 @@ FIRST-P says that this is the first month in the Summary buffer."
               (string-width prefix)
               (string-width date)
               1)))
-         (name (bs-gnus--summary-truncate name available))
+         (name (bs-truncate-string name available))
          (padding
           (make-string
            (max
@@ -4204,14 +4120,6 @@ Return non-nil when the Summary gained at least one article."
       (set-buffer-modified-p nil)
       (current-buffer))))
 
-(defun bs-gnus--today-bounds ()
-  "Return today's local-time bounds as epoch seconds."
-  (pcase-let* ((`(,_second ,_minute ,_hour ,day ,month ,year . ,_)
-                (decode-time))
-               (start (encode-time 0 0 0 day month year)))
-    (cons (float-time start)
-          (float-time (time-add start (days-to-time 1))))))
-
 (defun bs-gnus--today-overview-records
     (file group method start end)
   "Return today's records from overview FILE for GROUP and METHOD.
@@ -4259,7 +4167,7 @@ START and END are epoch seconds bounding the local calendar day."
 
 (defun bs-gnus--today-records ()
   "Return today's locally indexed articles from subscribed Gnus groups."
-  (pcase-let ((`(,start . ,end) (bs-gnus--today-bounds)))
+  (pcase-let ((`(,start . ,end) (bs-today-time-bounds)))
     (let (records)
       (dolist (info (cdr gnus-newsrc-alist))
         (when (<= (gnus-info-level info) gnus-level-subscribed)
@@ -4278,33 +4186,18 @@ START and END are epoch seconds bounding the local calendar day."
               (< (plist-get left :timestamp)
                  (plist-get right :timestamp)))))))
 
-(defun bs-gnus--context-subject (record)
-  "Return RECORD's subject without common reply prefixes."
-  (replace-regexp-in-string
-   "\\`\\(?:\\(?:re\\|fwd?\\):[ \\t]*\\)+" ""
-   (or (plist-get record :subject) "[no subject]") t t))
-
 (defun bs-gnus--context-thread-key (record)
   "Return a stable thread key for Gnus overview RECORD."
   (or (car (split-string (or (plist-get record :references) "")))
       (let ((message-id (plist-get record :message-id)))
         (and (not (string-empty-p (or message-id "")))
              message-id))
-      (downcase (bs-gnus--context-subject record))))
+      (downcase
+       (bs-message-base-subject (plist-get record :subject)))))
 
 (defun bs-gnus--records-by-thread (records)
   "Group chronological Gnus RECORDS by thread in first-article order."
-  (let ((table (make-hash-table :test #'equal))
-        order)
-    (dolist (record records)
-      (let ((key (bs-gnus--context-thread-key record)))
-        (unless (gethash key table)
-          (push key order))
-        (puthash key (cons record (gethash key table)) table)))
-    (mapcar
-     (lambda (key)
-       (nreverse (gethash key table)))
-     (nreverse order))))
+  (bs-group-by records #'bs-gnus--context-thread-key))
 
 (defun bs-gnus--context-article-fallback (record &optional error-data)
   "Return metadata for unavailable article RECORD.
@@ -4361,7 +4254,8 @@ When ERROR-DATA is non-nil, include its local rendering error."
             (concat
              (format "\n## Thread %d of %d: %s\n\n"
                      thread-index thread-count
-                     (bs-gnus--context-subject (car thread)))
+                     (bs-message-base-subject
+                      (plist-get (car thread) :subject)))
              (format "Newsgroups: %s\n"
                      (mapconcat #'identity groups ", ")))
             (cl-loop

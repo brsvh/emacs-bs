@@ -69,6 +69,43 @@
 (defvar bs-notifications--timer nil
   "Timer delivering queued desktop notifications serially.")
 
+(defun bs-notifications-cache-file (directory key)
+  "Return the persistent notification cache file for KEY in DIRECTORY."
+  (expand-file-name (secure-hash 'sha256 key) directory))
+
+(defun bs-notifications-cache-current-p (file expiry)
+  "Return non-nil when cache FILE is nonempty and younger than EXPIRY.
+EXPIRY is measured in seconds."
+  (when-let* ((attributes (file-attributes file)))
+    (and (> (file-attribute-size attributes) 0)
+         (< (float-time
+             (time-subtract
+              (current-time)
+              (file-attribute-modification-time attributes)))
+            expiry))))
+
+(defun bs-notifications-write-cache-data (file data &optional prefix)
+  "Atomically write binary DATA to notification cache FILE.
+Use PREFIX for the temporary file name and return FILE on success."
+  (let ((directory (file-name-directory file)))
+    (make-directory directory t)
+    (let ((temporary
+           (make-temp-file
+            (expand-file-name (or prefix ".notification-") directory))))
+      (unwind-protect
+          (progn
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert data)
+              (let ((coding-system-for-write 'binary))
+                (write-region (point-min) (point-max)
+                              temporary nil 'silent)))
+            (rename-file temporary file t)
+            (setq temporary nil)
+            file)
+        (when (and temporary (file-exists-p temporary))
+          (delete-file temporary))))))
+
 (cl-defun bs-notifications-create-client
     (&key source key-function delivery-function error-function)
   "Create a shared notification queue client.

@@ -317,40 +317,11 @@
 (defvar-local bs-mu4e--main-resize-timer nil
   "Pending Mu4e Main resize refresh timer.")
 
-(defun bs-mu4e--main-single-line (value fallback)
-  "Return VALUE as a trimmed single line, or FALLBACK when empty."
-  (let ((value
-         (string-trim
-          (replace-regexp-in-string
-           "[\n\r\t ]+" " " (or value "")))))
-    (if (string-empty-p value) fallback value)))
-
-(defun bs-mu4e--main-truncate (string width)
-  "Truncate STRING with an ASCII ellipsis to fit WIDTH columns."
-  (cond
-   ((<= width 0) "")
-   ((<= (string-width string) width) string)
-   ((<= width 3) (truncate-string-to-width string width))
-   (t
-    (concat (truncate-string-to-width string (- width 3)) "..."))))
-
 (defun bs-mu4e--main-buffer-width ()
   "Return the displayed width of the current Mu4e Main buffer."
   (if-let* ((window (get-buffer-window (current-buffer) t)))
       (window-body-width window)
     bs-mu4e-main-fallback-width))
-
-(defun bs-mu4e--main-top-spacing-prefix (spacing)
-  "Return a zero-width line prefix adding SPACING above a row."
-  (propertize
-   " " 'display
-   `(space :width 0 :height ,(+ 1.0 (max 0 spacing)) :ascent 100)))
-
-(defun bs-mu4e--main-header-right-padding (string)
-  "Return pixel-aware padding that right-aligns STRING."
-  (propertize
-   " " 'display
-   `(space :align-to (- right (+ (,(string-pixel-width string)) 1)))))
 
 (defun bs-mu4e--main-query-items ()
   "Return current bookmark query items without signaling errors."
@@ -464,7 +435,7 @@ ROOT-P identifies the synthetic root."
     (add-text-properties
      start (1+ start)
      `(line-prefix
-       ,(bs-mu4e--main-top-spacing-prefix
+       ,(bs-top-spacing-prefix
          (+ bs-mu4e-main-topic-line-spacing
             (if root-p bs-mu4e-main-header-bottom-spacing 0)))))))
 
@@ -495,15 +466,15 @@ RENDER-WIDTH control layout.  ACTION-P uses the ordinary name face."
          (content-width
           (max 0 (- render-width prefix-width
                     bs-mu4e-main-right-margin-width)))
-         (source (bs-mu4e--main-single-line source ""))
+         (source (bs-single-line source ""))
          (source-width (min (string-width source)
                             (max 0 (- content-width 2))))
-         (source (bs-mu4e--main-truncate source source-width))
+         (source (bs-truncate-string source source-width))
          (name-width
           (max 0 (- content-width (string-width source)
                     (if (string-empty-p source) 0 2))))
-         (name (bs-mu4e--main-truncate
-                (bs-mu4e--main-single-line name "[unnamed]")
+         (name (bs-truncate-string
+                (bs-single-line name "[unnamed]")
                 name-width))
          (padding
           (make-string
@@ -751,7 +722,7 @@ VARIANT is `full', `no-bookmarks', or `compact'."
             no-bookmarks)
            (t compact)))
          (header
-          (concat left (bs-mu4e--main-header-right-padding right) right)))
+          (concat left (bs-right-padding right) right)))
     (add-face-text-property
      0 (length header) 'bs-mu4e-main-header-face t header)
     header))
@@ -1499,46 +1470,12 @@ Use cleaned contact candidates for the duration of the call."
               ((not (string-empty-p address))))
     address))
 
-(defun bs-mu4e--notifications-avatar-file (address)
-  "Return the persistent avatar file for normalized ADDRESS."
-  (expand-file-name
-   (secure-hash 'sha256 address)
-   bs-mu4e-notifications-avatar-cache-directory))
-
-(defun bs-mu4e--notifications-avatar-current-p (file)
-  "Return non-nil when cached avatar FILE is present and current."
-  (when-let* ((attributes (file-attributes file)))
-    (and (> (file-attribute-size attributes) 0)
-         (< (float-time
-             (time-subtract
-              (current-time)
-              (file-attribute-modification-time attributes)))
-            bs-mu4e-notifications-avatar-cache-expiry))))
-
 (defun bs-mu4e--notifications-write-avatar (file image)
   "Atomically write IMAGE data to avatar cache FILE.
 Return FILE on success, or nil when IMAGE has no embedded data."
   (when-let* ((data (and (consp image)
                          (plist-get (cdr image) :data))))
-    (make-directory bs-mu4e-notifications-avatar-cache-directory t)
-    (let ((temporary
-           (make-temp-file
-            (expand-file-name
-             ".avatar-"
-             bs-mu4e-notifications-avatar-cache-directory))))
-      (unwind-protect
-          (progn
-            (with-temp-buffer
-              (set-buffer-multibyte nil)
-              (insert data)
-              (let ((coding-system-for-write 'binary))
-                (write-region (point-min) (point-max)
-                              temporary nil 'silent)))
-            (rename-file temporary file t)
-            (setq temporary nil)
-            file)
-        (when (and temporary (file-exists-p temporary))
-          (delete-file temporary))))))
+    (bs-notifications-write-cache-data file data ".avatar-")))
 
 (defun bs-mu4e--notifications-forget (id)
   "Forget the message associated with notification ID."
@@ -1657,9 +1594,12 @@ notification adapter."
 (defun bs-mu4e--notifications-prepare (mail)
   "Deliver MAIL after resolving its cached or remote sender avatar."
   (if-let* ((address (bs-mu4e--notifications-avatar-address mail))
-            (file (bs-mu4e--notifications-avatar-file address)))
+            (file
+             (bs-notifications-cache-file
+              bs-mu4e-notifications-avatar-cache-directory address)))
       (cond
-       ((bs-mu4e--notifications-avatar-current-p file)
+       ((bs-notifications-cache-current-p
+         file bs-mu4e-notifications-avatar-cache-expiry)
         (bs-mu4e--notifications-send mail file))
        ((gethash address bs-mu4e--notifications-avatar-waiters)
         (push mail
@@ -2069,31 +2009,14 @@ delegates all other fields to FUNCTION."
 (put 'bs-mu4e--headers-fold-state 'permanent-local t)
 (put 'bs-mu4e--headers-last-query 'permanent-local t)
 
-(defun bs-mu4e--headers-sanitize-string (string)
-  "Return STRING without control characters that break one-line layout."
-  (string-trim
-   (replace-regexp-in-string
-    "[[:cntrl:]\n\r\t]+"
-    " "
-    (if (stringp string) string ""))))
-
 (defun bs-mu4e--headers-field-width (field fallback)
   "Return configured width for FIELD, or FALLBACK."
   (let ((width (cdr (assq field mu4e-headers-fields))))
     (if (natnump width) width fallback)))
 
-(defun bs-mu4e--headers-truncate (string width)
-  "Truncate STRING to WIDTH columns with an ASCII ellipsis."
-  (cond
-   ((<= width 0) "")
-   ((<= (string-width string) width) string)
-   (t
-    (truncate-string-to-width
-     string width 0 nil (and (> width 3) "...")))))
-
 (defun bs-mu4e--headers-fit (string width)
   "Return STRING truncated or space-padded to WIDTH columns."
-  (let ((string (bs-mu4e--headers-truncate string width)))
+  (let ((string (bs-truncate-string string width)))
     (concat string
             (make-string (max 0 (- width (string-width string))) ?\s))))
 
@@ -2170,7 +2093,7 @@ delegates all other fields to FUNCTION."
                   (lambda (tag)
                     (propertize
                      (format "[%s]"
-                             (bs-mu4e--headers-sanitize-string tag))
+                             (bs-sanitize-single-line tag))
                      'font-lock-face 'bs-mu4e-headers-tag-face))
                   tags))
            (count (length tags)))
@@ -2266,7 +2189,7 @@ its subject to CONTENT-COLUMN."
                  count-padding
                  count-label
                  count-padding))
-         (subject (bs-mu4e--headers-sanitize-string
+         (subject (bs-sanitize-single-line
                    (mu4e-message-field root :subject)))
          (tag-limit
           (min
@@ -2281,7 +2204,7 @@ its subject to CONTENT-COLUMN."
                       (if (string-empty-p tags)
                           0
                         (1+ (string-width tags)))))
-         (subject (bs-mu4e--headers-truncate
+         (subject (bs-truncate-string
                    subject (max 0 (floor (- width reserved)))))
          (left (concat count count-gap subject))
          (left-width (+ content-column (string-width subject)))
@@ -2346,7 +2269,7 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
                   (string-width prefix)
                   (string-width date)
                   1)))
-         (correspondent (bs-mu4e--headers-truncate
+         (correspondent (bs-truncate-string
                          correspondent correspondent-width))
          (correspondent-start
           (+ (length mu4e--mark-fringe)
@@ -2403,7 +2326,7 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
 
 (defun bs-mu4e--headers-query ()
   "Return the current Mu4e query as a plain string."
-  (bs-mu4e--headers-sanitize-string
+  (bs-sanitize-single-line
    (if (stringp list-buffers-directory)
        list-buffers-directory
      "")))
@@ -2435,7 +2358,7 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
           (propertize " · " 'face 'bs-mu4e-headers-header-muted-face)))
     (concat
      (propertize
-      (bs-mu4e--headers-sanitize-string bs-mu4e-context-name)
+      (bs-sanitize-single-line bs-mu4e-context-name)
       'face 'bs-mu4e-headers-header-context-face)
      separator
      (propertize
@@ -2464,13 +2387,13 @@ Align PREFIX to CONTENT-COLUMN without changing the flags field."
             (bs-mu4e--headers-query)
             'face 'bs-mu4e-headers-header-query-face)))
          (identity
-          (bs-mu4e--headers-truncate
+          (bs-truncate-string
            identity
            (max 0 (- width (string-width statistics) 2))))
          (header
           (concat
            identity
-           (bs-mu4e--main-header-right-padding statistics)
+           (bs-right-padding statistics)
            statistics)))
     (add-face-text-property
      0 (length header) 'bs-mu4e-headers-header-face t header)
@@ -2525,7 +2448,7 @@ FIRST-P says that this is the first month in the Headers buffer."
      0 (length line) '(face bs-mu4e-headers-month-face) line)
     (add-text-properties
      0 1
-     `(line-prefix ,(bs-mu4e--main-top-spacing-prefix top-spacing))
+     `(line-prefix ,(bs-top-spacing-prefix top-spacing))
      line)
     (add-text-properties
      newline (length line)
@@ -3119,34 +3042,18 @@ Search backwards when BACKWARDS is non-nil."
              (or (mu4e-message-field left :date) 0)
              (or (mu4e-message-field right :date) 0))))))
 
-(defun bs-mu4e--context-subject (message)
-  "Return MESSAGE's subject without common reply prefixes."
-  (let ((subject
-         (or (mu4e-message-field message :subject) "[no subject]")))
-    (replace-regexp-in-string
-     "\\`\\(?:\\(?:re\\|fwd?\\):[ \\t]*\\)+" ""
-     subject t t)))
-
 (defun bs-mu4e--context-thread-key (message)
   "Return a stable thread key for Mu4e MESSAGE."
   (or (car (mu4e-message-field message :references))
       (mu4e-message-field message :message-id)
-      (downcase (bs-mu4e--context-subject message))
+      (downcase
+       (bs-message-base-subject
+        (mu4e-message-field message :subject)))
       (mu4e-message-field message :path)))
 
 (defun bs-mu4e--messages-by-thread (messages)
   "Group chronological MESSAGES by thread in first-message order."
-  (let ((table (make-hash-table :test #'equal))
-        order)
-    (dolist (message messages)
-      (let ((key (bs-mu4e--context-thread-key message)))
-        (unless (gethash key table)
-          (push key order))
-        (puthash key (cons message (gethash key table)) table)))
-    (mapcar
-     (lambda (key)
-       (nreverse (gethash key table)))
-     (nreverse order))))
+  (bs-group-by messages #'bs-mu4e--context-thread-key))
 
 (defun bs-mu4e--context-contact (contact)
   "Return a readable string for Mu4e CONTACT."
@@ -3208,7 +3115,8 @@ Search backwards when BACKWARDS is non-nil."
        (insert
         (format "\n## Thread %d of %d: %s\n"
                 thread-index (length threads)
-                (bs-mu4e--context-subject (car thread))))
+                (bs-message-base-subject
+                 (mu4e-message-field (car thread) :subject))))
        (cl-loop
         for message in thread
         for message-index from 1

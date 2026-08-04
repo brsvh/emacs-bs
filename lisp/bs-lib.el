@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 
 (defun bs--decode-raw-utf-8 (string)
   "Decode raw UTF-8 byte sequences in STRING.
@@ -42,6 +43,83 @@ characters so the result contains only Unicode scalar values."
         character)))
    (decode-coding-string string 'utf-8)
    ""))
+
+(defun bs-single-line (value fallback)
+  "Return VALUE as a trimmed single line, or FALLBACK when empty."
+  (let ((value
+         (string-trim
+          (replace-regexp-in-string
+           "[\n\r\t ]+" " " (or value "")))))
+    (if (string-empty-p value) fallback value)))
+
+(defun bs-sanitize-single-line (value)
+  "Return VALUE without control characters that break one-line layout."
+  (string-trim
+   (replace-regexp-in-string
+    "[[:cntrl:]\n\r\t]+" " "
+    (if (stringp value) value ""))))
+
+(defun bs-truncate-string (string width)
+  "Truncate STRING to WIDTH columns with an ASCII ellipsis."
+  (cond
+   ((<= width 0) "")
+   ((<= (string-width string) width) string)
+   (t
+    (truncate-string-to-width
+     string width 0 nil (and (> width 3) "...")))))
+
+(defun bs-right-padding (string &optional margin)
+  "Return pixel-aware padding that right-aligns STRING.
+Leave MARGIN columns at the right edge, defaulting to one."
+  (propertize
+   " " 'display
+   `(space
+     :align-to
+     (- right
+        (+ (,(string-pixel-width string)) ,(or margin 1))))))
+
+(defun bs-top-spacing-prefix (spacing)
+  "Return a zero-width line prefix adding SPACING above a row."
+  (propertize
+   " " 'display
+   `(space
+     :width 0
+     :height ,(+ 1.0 (max 0 spacing))
+     :ascent 100)))
+
+(defun bs-group-by (items key-function &optional test)
+  "Group ITEMS by KEY-FUNCTION while preserving their order.
+Preserve the order in which keys first appear and the order of items
+inside each group.  Compare keys with hash table TEST, or `equal' when
+TEST is nil."
+  (let ((table (make-hash-table :test (or test #'equal)))
+        order)
+    (dolist (item items)
+      (let ((key (funcall key-function item)))
+        (unless (gethash key table)
+          (push key order))
+        (puthash key (cons item (gethash key table)) table)))
+    (mapcar
+     (lambda (key)
+       (nreverse (gethash key table)))
+     (nreverse order))))
+
+(defun bs-today-time-bounds (&optional time)
+  "Return local calendar-day bounds around TIME as epoch seconds.
+Use the current time when TIME is nil."
+  (pcase-let* ((`(,_second ,_minute ,_hour ,day ,month ,year . ,_)
+                (decode-time time))
+               (start (encode-time 0 0 0 day month year))
+               (end (encode-time 0 0 0 (1+ day) month year)))
+    (cons (float-time start)
+          (float-time end))))
+
+(defun bs-message-base-subject (subject &optional fallback)
+  "Return SUBJECT without common reply prefixes.
+Use FALLBACK, or \"[no subject]\", when SUBJECT is nil."
+  (replace-regexp-in-string
+   "\\`\\(?:\\(?:re\\|fwd?\\):[[:blank:]]*\\)+" ""
+   (or subject fallback "[no subject]") t t))
 
 ;;;###autoload
 (defun bs-path (&rest segments)

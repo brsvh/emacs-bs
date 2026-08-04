@@ -468,17 +468,9 @@ standard behaviors."
         (bs-elfeed--render-html content)
       (string-trim content))))
 
-(defun bs-elfeed--today-bounds ()
-  "Return today's local-time bounds as epoch seconds."
-  (pcase-let* ((`(,_second ,_minute ,_hour ,day ,month ,year . ,_)
-                (decode-time))
-               (start (encode-time 0 0 0 day month year)))
-    (cons (float-time start)
-          (float-time (time-add start (days-to-time 1))))))
-
 (defun bs-elfeed--today-entries ()
   "Return today's locally stored Elfeed entries in chronological order."
-  (pcase-let ((`(,start . ,end) (bs-elfeed--today-bounds)))
+  (pcase-let ((`(,start . ,end) (bs-today-time-bounds)))
     (let (entries)
       ;; `elfeed-db-visit' walks newest first, so pushing produces the
       ;; chronological order wanted inside each feed group.
@@ -494,21 +486,11 @@ standard behaviors."
 
 (defun bs-elfeed--entries-by-feed (entries)
   "Group chronological ENTRIES by feed in first-entry order."
-  (let ((table (make-hash-table :test #'equal))
-        order)
-    (dolist (entry entries)
-      (let ((feed-id (elfeed-entry-feed-id entry)))
-        (unless (gethash feed-id table)
-          (push feed-id order))
-        (puthash feed-id
-                 (cons entry (gethash feed-id table))
-                 table)))
-    (mapcar
-     (lambda (feed-id)
-       (let ((feed-entries (nreverse (gethash feed-id table))))
-         (cons (elfeed-entry-feed (car feed-entries))
-               feed-entries)))
-     (nreverse order))))
+  (mapcar
+   (lambda (feed-entries)
+     (cons (elfeed-entry-feed (car feed-entries))
+           feed-entries))
+   (bs-group-by entries #'elfeed-entry-feed-id)))
 
 (defun bs-elfeed--insert-today-entry (entry index count)
   "Insert locally stored ENTRY numbered INDEX out of COUNT."
@@ -776,46 +758,11 @@ update feeds or fetch linked pages."
     (message "Prepared %d Elfeed entries from today in %s"
              (length entries) bs-elfeed-context-buffer-name)))
 
-(defun bs-elfeed--single-line (value fallback)
-  "Return VALUE as a trimmed single line, or FALLBACK when empty."
-  (let ((value
-         (string-trim
-          (replace-regexp-in-string
-           "[\n\r\t ]+" " " (or value "")))))
-    (if (string-empty-p value) fallback value)))
-
-(defun bs-elfeed--truncate (string width)
-  "Truncate STRING with an ASCII ellipsis to fit WIDTH columns."
-  (cond
-   ((<= width 0) "")
-   ((<= (string-width string) width) string)
-   ((<= width 3) (truncate-string-to-width string width))
-   (t
-    (concat (truncate-string-to-width string (- width 3)) "..."))))
-
 (defun bs-elfeed--buffer-width (fallback)
   "Return the displayed width of the current buffer, or FALLBACK."
   (if-let* ((window (get-buffer-window (current-buffer) t)))
       (window-body-width window)
     fallback))
-
-(defun bs-elfeed--header-right-padding (string)
-  "Return pixel-aware padding that right-aligns STRING with one margin."
-  (propertize
-   " " 'display
-   `(space
-     :align-to
-     (- right
-        (+ (,(string-pixel-width string)) 1)))))
-
-(defun bs-elfeed--top-spacing-prefix (spacing)
-  "Return a zero-width line prefix adding SPACING above a row."
-  (propertize
-   " " 'display
-   `(space
-     :width 0
-     :height ,(+ 1.0 (max 0 spacing))
-     :ascent 100)))
 
 (defun bs-elfeed--update-if-idle ()
   "Start an Elfeed update when no update jobs are active."
@@ -854,44 +801,6 @@ update feeds or fetch linked pages."
           (url-user url) nil
           (url-password url) nil)
     (url-recreate-url url)))
-
-(defun bs-elfeed--notifications-favicon-file (origin)
-  "Return the persistent favicon file for feed ORIGIN."
-  (expand-file-name
-   (secure-hash 'sha256 origin)
-   bs-elfeed-notifications-favicon-cache-directory))
-
-(defun bs-elfeed--notifications-favicon-current-p (file)
-  "Return non-nil when cached favicon FILE is present and current."
-  (when-let* ((attributes (file-attributes file)))
-    (and (> (file-attribute-size attributes) 0)
-         (< (float-time
-             (time-subtract
-              (current-time)
-              (file-attribute-modification-time attributes)))
-            bs-elfeed-notifications-favicon-cache-expiry))))
-
-(defun bs-elfeed--notifications-write-favicon (file data)
-  "Atomically write favicon DATA to cache FILE and return FILE."
-  (make-directory bs-elfeed-notifications-favicon-cache-directory t)
-  (let ((temporary
-         (make-temp-file
-          (expand-file-name
-           ".favicon-"
-           bs-elfeed-notifications-favicon-cache-directory))))
-    (unwind-protect
-        (progn
-          (with-temp-buffer
-            (set-buffer-multibyte nil)
-            (insert data)
-            (let ((coding-system-for-write 'binary))
-              (write-region (point-min) (point-max)
-                            temporary nil 'silent)))
-          (rename-file temporary file t)
-          (setq temporary nil)
-          file)
-      (when (and temporary (file-exists-p temporary))
-        (delete-file temporary)))))
 
 (defun bs-elfeed--notifications-forget (id)
   "Forget the Elfeed entry associated with notification ID."
@@ -946,13 +855,13 @@ REASON is ignored."
 (defun bs-elfeed--notifications-title (entry)
   "Return ENTRY's feed title for a notification."
   (let ((feed (elfeed-entry-feed entry)))
-    (bs-elfeed--single-line
+    (bs-single-line
      (and feed (elfeed-feed-title feed))
      (if feed (elfeed-feed-id feed) "Elfeed"))))
 
 (defun bs-elfeed--notifications-body (entry)
   "Return ENTRY's title for a notification."
-  (bs-elfeed--single-line
+  (bs-single-line
    (elfeed-entry-title entry) "(Untitled)"))
 
 (defun bs-elfeed--notifications-key (record)
@@ -1112,9 +1021,11 @@ REASON is ignored."
            (file
             (and data
                  (condition-case error-data
-                     (bs-elfeed--notifications-write-favicon
-                      (bs-elfeed--notifications-favicon-file origin)
-                      data)
+                     (bs-notifications-write-cache-data
+                      (bs-notifications-cache-file
+                       bs-elfeed-notifications-favicon-cache-directory
+                       origin)
+                      data ".favicon-")
                    (error
                     (message "Failed to cache Elfeed favicon for %s: %s"
                              origin
@@ -1225,9 +1136,12 @@ STATUS is ignored because the HTTP status is inspected directly."
   "Notify about ENTRY after resolving its feed favicon."
   (let ((entry-id (elfeed-entry-id entry)))
     (if-let* ((origin (bs-elfeed--notifications-origin entry))
-              (file (bs-elfeed--notifications-favicon-file origin)))
+              (file
+               (bs-notifications-cache-file
+                bs-elfeed-notifications-favicon-cache-directory origin)))
         (cond
-         ((bs-elfeed--notifications-favicon-current-p file)
+         ((bs-notifications-cache-current-p
+           file bs-elfeed-notifications-favicon-cache-expiry)
           (bs-elfeed--notifications-send entry-id file))
          ((gethash origin bs-elfeed--notifications-favicon-jobs)
           (cl-pushnew
@@ -1349,7 +1263,7 @@ STATUS is ignored because the HTTP status is inspected directly."
          (host (and url (url-host url))))
     (replace-regexp-in-string
      "\\`www\\." ""
-     (bs-elfeed--single-line host id))))
+     (bs-single-line host id))))
 
 (defun bs-elfeed--tree-sort-nodes (nodes)
   "Return a display-name-sorted copy of tree NODES."
@@ -1364,8 +1278,8 @@ STATUS is ignored because the HTTP status is inspected directly."
   (sort (copy-sequence leaves)
         (lambda (left right)
           (string-lessp
-           (bs-elfeed--single-line (car left) "[untitled]")
-           (bs-elfeed--single-line (car right) "[untitled]")))))
+           (bs-single-line (car left) "[untitled]")
+           (bs-single-line (car right) "[untitled]")))))
 
 (defun bs-elfeed--tree-count-widths (node)
   "Return unread and total count widths below NODE."
@@ -1500,7 +1414,7 @@ COLLAPSED controls whether the disclosure marker is shown."
                           (bs-elfeed--tree-statistics-string
                            feed-count unread read))
                          (padding
-                          (bs-elfeed--header-right-padding
+                          (bs-right-padding
                            statistics)))
               (concat status padding statistics)))))
     (add-face-text-property
@@ -1546,7 +1460,7 @@ its Search filter, and ROOT-P identifies the synthetic root."
       'mouse-face 'highlight)
      ?\n)
     (let ((prefix
-           (bs-elfeed--top-spacing-prefix
+           (bs-top-spacing-prefix
             (+ bs-elfeed-tree-topic-line-spacing
                (if root-p
                    bs-elfeed-header-bottom-spacing
@@ -1589,7 +1503,7 @@ COUNT-WIDTHS and RENDER-WIDTH control the column layout."
                (count
                 (bs-elfeed--tree-count unread read count-widths))
                (host (bs-elfeed--tree-host feed))
-               (source (bs-elfeed--single-line title "[untitled]"))
+               (source (bs-single-line title "[untitled]"))
                (prefix-width
                 (+ bs-elfeed-tree-feed-indentation-width
                    (nth 0 count-widths)
@@ -1598,11 +1512,11 @@ COUNT-WIDTHS and RENDER-WIDTH control the column layout."
                 (max 0
                      (- render-width prefix-width
                         bs-elfeed-tree-feed-right-margin-width)))
-               (source (bs-elfeed--truncate source content-width))
+               (source (bs-truncate-string source content-width))
                (remaining
                 (max 0 (- content-width (string-width source))))
                (host-width (max 0 (- remaining 2)))
-               (host (bs-elfeed--truncate host host-width))
+               (host (bs-truncate-string host host-width))
                (padding-width
                 (max 0 (- remaining (string-width host))))
                (line
@@ -1830,7 +1744,7 @@ When FORCE is nil, redraw only after the database changes."
            ((<= (abs score) bs-elfeed-search-score-limit)
             (number-to-string score))
            (t (bs-elfeed--search-compact-score score))))
-         (content (bs-elfeed--truncate content width))
+         (content (bs-truncate-string content width))
          (padding
           (make-string
            (max 0 (- width (string-width content))) ?\s)))
@@ -1854,7 +1768,7 @@ Remove spacing previously installed by this package otherwise."
            (point-min) (1+ (point-min))
            `(bs-elfeed-header-bottom-spacing t
                                              line-prefix
-                                             ,(bs-elfeed--top-spacing-prefix
+                                             ,(bs-top-spacing-prefix
                                                bs-elfeed-header-bottom-spacing)))
         (remove-text-properties
          (point-min) (1+ (point-min))
@@ -1884,8 +1798,8 @@ Remove spacing previously installed by this package otherwise."
              bs-elfeed-search-right-margin-width))
          (title-width (max 0 (- width fixed-width)))
          (title
-          (bs-elfeed--truncate
-           (bs-elfeed--single-line
+          (bs-truncate-string
+           (bs-single-line
             (elfeed-entry-title entry) "[untitled]")
            title-width)))
     (setq bs-elfeed-search--render-width width)
@@ -1951,10 +1865,10 @@ Remove spacing previously installed by this package otherwise."
                            (string-width statistics) 1)))
                 (filter
                  (propertize
-                  (bs-elfeed--truncate elfeed-search-filter filter-width)
+                  (bs-truncate-string elfeed-search-filter filter-width)
                   'face 'bs-elfeed-search-filter-face))
                 (padding
-                 (bs-elfeed--header-right-padding statistics)))
+                 (bs-right-padding statistics)))
            (concat label " " filter padding statistics)))))
     (add-face-text-property
      0 (length header) 'bs-elfeed-search-header-face t header)
@@ -1967,7 +1881,7 @@ FIRST-P says that this is the first separator in the buffer."
          (+ bs-elfeed-search-month-line-spacing
             (if first-p bs-elfeed-header-bottom-spacing 0))))
     (concat
-     (bs-elfeed--top-spacing-prefix top-spacing)
+     (bs-top-spacing-prefix top-spacing)
      (propertize
       (concat "  " (string-trim-left title) "\n")
       'face 'bs-elfeed-search-month-face
