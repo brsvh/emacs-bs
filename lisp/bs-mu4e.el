@@ -29,6 +29,7 @@
 
 (require 'cl-lib)
 (require 'bs-lib)
+(require 'bs-notifications)
 (require 'mail-parse)
 (require 'outline)
 (require 'subr-x)
@@ -1259,6 +1260,14 @@ standard behaviors."
 (defvar bs-mu4e--notifications-enabled nil
   "Non-nil when Mu4e Alert delivery is handled by bs-mu4e.")
 
+(defvar bs-mu4e--notifications-client
+  (bs-notifications-create-client
+   :source 'mu4e
+   :key-function #'bs-mu4e--notifications-key
+   :delivery-function #'bs-mu4e--notifications-deliver
+   :error-function #'bs-mu4e--notifications-report-error)
+  "Mu4e client of the shared desktop notification queue.")
+
 (defvar bs-mu4e--notifications-id-to-message-id nil
   "Alist mapping desktop notification identifiers to message IDs.")
 
@@ -1584,28 +1593,47 @@ REASON is ignored."
         subject
       "(No subject)")))
 
+(defun bs-mu4e--notifications-key (record)
+  "Return the notification queue key for Mu4e RECORD."
+  (plist-get (car record) :message-id))
+
+(defun bs-mu4e--notifications-deliver (record)
+  "Deliver Mu4e notification RECORD if it remains eligible."
+  (pcase-let ((`(,mail ,avatar-file) record))
+    (when (and bs-mu4e--notifications-enabled
+               (stringp (plist-get mail :message-id)))
+      (when-let* ((id
+                   (notifications-notify
+                    :title (bs-mu4e--notifications-title mail)
+                    :body (bs-mu4e--notifications-subject mail)
+                    :actions '("read" "Read"
+                               "mark-read" "Mark As Read"
+                               "default" "Read")
+                    :on-action #'bs-mu4e--notifications-action
+                    :on-close #'bs-mu4e--notifications-close
+                    :app-icon bs-mu4e-notifications-app-icon
+                    :image-path avatar-file
+                    :app-name "mu4e"
+                    :category "email.arrived"
+                    :timeout bs-mu4e-notifications-timeout)))
+        (setq bs-mu4e--notifications-id-to-message-id
+              (cons (cons id (plist-get mail :message-id))
+                    (assq-delete-all
+                     id bs-mu4e--notifications-id-to-message-id)))))))
+
+(defun bs-mu4e--notifications-report-error (record error-data)
+  "Report ERROR-DATA encountered while notifying about Mu4e RECORD."
+  (message "Failed to notify about Mu4e message %s: %s"
+           (bs-mu4e--notifications-subject (car record))
+           (error-message-string error-data)))
+
 (defun bs-mu4e--notifications-send (mail avatar-file)
-  "Notify about MAIL using AVATAR-FILE when it remains enabled."
+  "Queue MAIL with AVATAR-FILE for serial desktop notification delivery."
   (when (and bs-mu4e--notifications-enabled
              (stringp (plist-get mail :message-id)))
-    (when-let* ((id
-                 (notifications-notify
-                  :title (bs-mu4e--notifications-title mail)
-                  :body (bs-mu4e--notifications-subject mail)
-                  :actions '("read" "Read"
-                             "mark-read" "Mark As Read"
-                             "default" "Read")
-                  :on-action #'bs-mu4e--notifications-action
-                  :on-close #'bs-mu4e--notifications-close
-                  :app-icon bs-mu4e-notifications-app-icon
-                  :image-path avatar-file
-                  :app-name "mu4e"
-                  :category "email.arrived"
-                  :timeout bs-mu4e-notifications-timeout)))
-      (setq bs-mu4e--notifications-id-to-message-id
-            (cons (cons id (plist-get mail :message-id))
-                  (assq-delete-all
-                   id bs-mu4e--notifications-id-to-message-id))))))
+    (bs-notifications-enqueue
+     bs-mu4e--notifications-client
+     (list mail avatar-file))))
 
 (defun bs-mu4e--notifications-avatar-retrieved
     (image address file generation)
@@ -1671,6 +1699,7 @@ notification adapter."
      'mu4e-alert-notify-unread-messages
      #'bs-mu4e-notifications-notify-unread-messages)
     (clrhash bs-mu4e--notifications-avatar-waiters)
+    (bs-notifications-clear-client bs-mu4e--notifications-client)
     (dolist (entry bs-mu4e--notifications-id-to-message-id)
       (ignore-errors
         (notifications-close-notification (car entry))))

@@ -29,6 +29,7 @@
 
 (require 'cl-lib)
 (require 'bs-lib)
+(require 'bs-notifications)
 (require 'gnus)
 (require 'mail-parse)
 (require 'seq)
@@ -540,16 +541,6 @@ After exhausting the list, continue using its final delay."
   :type 'natnum
   :group 'bs-gnus)
 
-(defcustom bs-gnus-notifications-delivery-interval 1
-  "Seconds between consecutive Gnus desktop notifications."
-  :type 'number
-  :group 'bs-gnus)
-
-(defcustom bs-gnus-notifications-rate-limit-retry-delay 10
-  "Retry delay after desktop notification rate limiting, in seconds."
-  :type 'number
-  :group 'bs-gnus)
-
 (defcustom bs-gnus-notifications-read-display-function
   #'bs-call-in-new-frame
   "Function used to display Gnus notification Read actions.
@@ -705,15 +696,13 @@ standard behaviors."
 (defvar bs-gnus--notifications-enabled nil
   "Non-nil when the background-update notification adapter is enabled.")
 
-(defvar bs-gnus--notifications-pending
-  (make-hash-table :test #'equal)
-  "Article keys queued for desktop notification delivery.")
-
-(defvar bs-gnus--notifications-queue nil
-  "Unread article records awaiting desktop notification delivery.")
-
-(defvar bs-gnus--notifications-timer nil
-  "Timer delivering queued desktop notifications serially.")
+(defvar bs-gnus--notifications-client
+  (bs-notifications-create-client
+   :source 'gnus
+   :key-function #'bs-gnus--notifications-key
+   :delivery-function #'bs-gnus--notifications-deliver
+   :error-function #'bs-gnus--notifications-report-error)
+  "Gnus client of the shared desktop notification queue.")
 
 (defvar bs-gnus--update-header-map
   (let ((map (make-sparse-keymap)))
@@ -1338,8 +1327,9 @@ pair containing the fetched body numbers and any errors."
   "Return unread GROUP articles not yet notified this session."
   (seq-remove
    (lambda (article)
-     (gethash (cons group article)
-              bs-gnus--notifications-pending))
+     (bs-notifications-key-pending-p
+      bs-gnus--notifications-client
+      (cons group article)))
    (seq-difference
     (gnus-list-of-unread-articles group)
     (bs-gnus--notifications-sent-articles group)
@@ -1925,17 +1915,8 @@ requested header numbers.  Return the numbers actually available."
   (cons (plist-get record :group)
         (plist-get record :article)))
 
-(defun bs-gnus--notifications-rate-limit-error-p (error-data)
-  "Return non-nil when ERROR-DATA reports desktop notification rate limiting."
-  (string-match-p
-   (regexp-quote
-    "org.freedesktop.Notifications.Error.ExcessNotificationGeneration")
-   (error-message-string error-data)))
-
 (defun bs-gnus--notifications-deliver (record)
-  "Deliver unread article RECORD if it remains eligible.
-Return `rate-limited' when the desktop notification service rejects
-the request temporarily."
+  "Deliver unread article RECORD if it remains eligible."
   (when bs-gnus--notifications-enabled
     (let ((group (plist-get record :group))
           (article (plist-get record :article))
@@ -1947,60 +1928,27 @@ the request temporarily."
                             (bs-gnus--notifications-sent-articles
                              group)))
                  (not (bs-gnus--notifications-own-address-p address)))
-        (condition-case error-data
-            (when-let* ((id
-                         (gnus-notifications-notify
-                          (plist-get record :sender)
-                          (plist-get record :subject)
-                          (and-let* ((file
-                                      (plist-get record :photo-file)))
-                            (and (file-readable-p file) file)))))
-              (bs-gnus--notifications-mark-sent
-               group article id)
-              'delivered)
-          (dbus-error
-           (if (bs-gnus--notifications-rate-limit-error-p error-data)
-               'rate-limited
-             (message "Failed to notify about Gnus article %d: %s"
-                      article (error-message-string error-data))
-             'failed))
-          (error
-           (message "Failed to notify about Gnus article %d: %s"
-                    article (error-message-string error-data))
-           'failed))))))
+        (when-let* ((id
+                     (gnus-notifications-notify
+                      (plist-get record :sender)
+                      (plist-get record :subject)
+                      (and-let* ((file
+                                  (plist-get record :photo-file)))
+                        (and (file-readable-p file) file)))))
+          (bs-gnus--notifications-mark-sent
+           group article id))))))
 
-(defun bs-gnus--notifications-schedule (delay)
-  "Schedule the next queued notification after DELAY seconds."
-  (unless (timerp bs-gnus--notifications-timer)
-    (setq bs-gnus--notifications-timer
-          (run-at-time
-           (max 0 delay) nil #'bs-gnus--notifications-dispatch))))
-
-(defun bs-gnus--notifications-dispatch ()
-  "Deliver the next queued notification and schedule its successor."
-  (setq bs-gnus--notifications-timer nil)
-  (when-let* ((record (pop bs-gnus--notifications-queue)))
-    (let* ((key (bs-gnus--notifications-key record))
-           (result (bs-gnus--notifications-deliver record)))
-      (if (eq result 'rate-limited)
-          (progn
-            (push record bs-gnus--notifications-queue)
-            (bs-gnus--notifications-schedule
-             bs-gnus-notifications-rate-limit-retry-delay))
-        (remhash key bs-gnus--notifications-pending)
-        (when bs-gnus--notifications-queue
-          (bs-gnus--notifications-schedule
-           bs-gnus-notifications-delivery-interval))))))
+(defun bs-gnus--notifications-report-error (record error-data)
+  "Report ERROR-DATA encountered while notifying about article RECORD."
+  (message "Failed to notify about Gnus article %d: %s"
+           (plist-get record :article)
+           (error-message-string error-data)))
 
 (defun bs-gnus--notifications-send (record)
   "Queue unread article RECORD for serial desktop notification delivery."
   (when bs-gnus--notifications-enabled
-    (let ((key (bs-gnus--notifications-key record)))
-      (unless (gethash key bs-gnus--notifications-pending)
-        (puthash key t bs-gnus--notifications-pending)
-        (setq bs-gnus--notifications-queue
-              (nconc bs-gnus--notifications-queue (list record)))
-        (bs-gnus--notifications-schedule 0)))))
+    (bs-notifications-enqueue
+     bs-gnus--notifications-client record)))
 
 (defun bs-gnus--notifications-read-and-position
     (function id key group article)
@@ -2315,11 +2263,7 @@ Open mapped Read actions using the configured display function."
   "Disable notifications without clearing this session's sent state."
   (interactive)
   (setq bs-gnus--notifications-enabled nil)
-  (when (timerp bs-gnus--notifications-timer)
-    (cancel-timer bs-gnus--notifications-timer))
-  (setq bs-gnus--notifications-timer nil
-        bs-gnus--notifications-queue nil)
-  (clrhash bs-gnus--notifications-pending)
+  (bs-notifications-clear-client bs-gnus--notifications-client)
   (advice-remove
    'gnus-notifications-action
    #'bs-gnus--notifications-action-with-display-function))

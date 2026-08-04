@@ -29,6 +29,7 @@
 
 (require 'cl-lib)
 (require 'bs-lib)
+(require 'bs-notifications)
 (require 'dom)
 (require 'elfeed)
 (require 'elfeed-db)
@@ -386,6 +387,14 @@ standard behaviors."
 
 (defvar bs-elfeed--notifications-enabled nil
   "Non-nil when actionable Elfeed notifications are enabled.")
+
+(defvar bs-elfeed--notifications-client
+  (bs-notifications-create-client
+   :source 'elfeed
+   :key-function #'bs-elfeed--notifications-key
+   :delivery-function #'bs-elfeed--notifications-deliver
+   :error-function #'bs-elfeed--notifications-report-error)
+  "Elfeed client of the shared desktop notification queue.")
 
 (defvar bs-elfeed--notifications-favicon-generation 0
   "Generation identifying relevant asynchronous favicon callbacks.")
@@ -946,40 +955,59 @@ REASON is ignored."
   (bs-elfeed--single-line
    (elfeed-entry-title entry) "(Untitled)"))
 
+(defun bs-elfeed--notifications-key (record)
+  "Return the notification queue key for Elfeed RECORD."
+  (car record))
+
+(defun bs-elfeed--notifications-deliver (record)
+  "Deliver Elfeed notification RECORD if it remains eligible."
+  (pcase-let ((`(,entry-id ,favicon-file) record))
+    (when-let* (((and bs-elfeed--notifications-enabled
+                      (not (gethash
+                            entry-id
+                            bs-elfeed--notifications-sent-entry-ids))))
+                (entry (elfeed-db-get-entry entry-id))
+                ((memq 'unread (elfeed-entry-tags entry))))
+      (when-let* ((id
+                   (notifications-notify
+                    :title (bs-elfeed--notifications-title entry)
+                    :body (bs-elfeed--notifications-body entry)
+                    :actions '("read" "Read"
+                               "mark-read" "Mark As Read"
+                               "default" "Read")
+                    :on-action #'bs-elfeed--notifications-action
+                    :on-close #'bs-elfeed--notifications-close
+                    :app-icon bs-elfeed-notifications-app-icon
+                    :image-path favicon-file
+                    :app-name "Elfeed"
+                    :category "news"
+                    :timeout bs-elfeed-notifications-timeout)))
+        (puthash entry-id t
+                 bs-elfeed--notifications-sent-entry-ids)
+        (setq bs-elfeed--notifications-id-to-entry-id
+              (cons
+               (cons id entry-id)
+               (assq-delete-all
+                id bs-elfeed--notifications-id-to-entry-id)))))))
+
+(defun bs-elfeed--notifications-report-error (record error-data)
+  "Report ERROR-DATA encountered while notifying about Elfeed RECORD."
+  (let ((entry (elfeed-db-get-entry (car record))))
+    (message "Failed to notify about Elfeed entry %s: %s"
+             (if entry
+                 (bs-elfeed--notifications-body entry)
+               (car record))
+             (error-message-string error-data))))
+
 (defun bs-elfeed--notifications-send (entry-id favicon-file)
-  "Notify about ENTRY-ID using FAVICON-FILE when still eligible."
-  (when-let* (((and bs-elfeed--notifications-enabled
-                    (not (gethash
-                          entry-id
-                          bs-elfeed--notifications-sent-entry-ids))))
-              (entry (elfeed-db-get-entry entry-id))
-              ((memq 'unread (elfeed-entry-tags entry))))
-    (condition-case error-data
-        (when-let* ((id
-                     (notifications-notify
-                      :title (bs-elfeed--notifications-title entry)
-                      :body (bs-elfeed--notifications-body entry)
-                      :actions '("read" "Read"
-                                 "mark-read" "Mark As Read"
-                                 "default" "Read")
-                      :on-action #'bs-elfeed--notifications-action
-                      :on-close #'bs-elfeed--notifications-close
-                      :app-icon bs-elfeed-notifications-app-icon
-                      :image-path favicon-file
-                      :app-name "Elfeed"
-                      :category "news"
-                      :timeout bs-elfeed-notifications-timeout)))
-          (puthash entry-id t
-                   bs-elfeed--notifications-sent-entry-ids)
-          (setq bs-elfeed--notifications-id-to-entry-id
-                (cons
-                 (cons id entry-id)
-                 (assq-delete-all
-                  id bs-elfeed--notifications-id-to-entry-id))))
-      (error
-       (message "Failed to notify about Elfeed entry %s: %s"
-                (bs-elfeed--notifications-body entry)
-                (error-message-string error-data))))))
+  "Queue ENTRY-ID with FAVICON-FILE for serial notification delivery."
+  (when (and bs-elfeed--notifications-enabled
+             (not (gethash
+                   entry-id bs-elfeed--notifications-sent-entry-ids))
+             entry-id)
+    (bs-notifications-enqueue
+     bs-elfeed--notifications-client
+     (list entry-id favicon-file))))
 
 (defun bs-elfeed--notifications-favicon-job-current-p (job)
   "Return non-nil when JOB belongs to the active favicon generation."
@@ -1275,6 +1303,7 @@ STATUS is ignored because the HTTP status is inspected directly."
      'elfeed-update-hook
      #'bs-elfeed--notifications-scan-unread)
     (bs-elfeed--notifications-stop-favicon-jobs)
+    (bs-notifications-clear-client bs-elfeed--notifications-client)
     (dolist (entry
              (copy-sequence
               bs-elfeed--notifications-id-to-entry-id))
