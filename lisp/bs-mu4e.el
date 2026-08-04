@@ -3129,6 +3129,22 @@ Search backwards when BACKWARDS is non-nil."
       (set-buffer-modified-p nil)
       (current-buffer))))
 
+(defun bs-mu4e--activate-context-source-line ()
+  "Activate a nonempty source line for the prepared Mu4e context."
+  (let ((bounds
+         (save-excursion
+           (beginning-of-line)
+           (if (re-search-forward
+                "[^[:space:]]" (line-end-position) t)
+               (cons (line-beginning-position) (line-end-position))
+             (goto-char (point-min))
+             (when (re-search-forward "[^[:space:]]" nil t)
+               (cons (line-beginning-position)
+                     (line-end-position)))))))
+    (when bounds
+      (goto-char (car bounds))
+      (push-mark (cdr bounds) nil t))))
+
 (defun bs-mu4e--headers-build-thread-context (messages query)
   "Build a thread context for MESSAGES from Mu4e QUERY."
   (let ((texts (mapcar #'bs-mu4e--headers-render-message messages))
@@ -3207,6 +3223,7 @@ chronologically without updating mail or the Mu database."
                   bs-mu4e-context-name))
     (bs-mu4e--build-today-context messages query)
     (run-hooks 'bs-mu4e-headers-thread-context-hook)
+    (bs-mu4e--activate-context-source-line)
     (message "Prepared %d Mu4e messages from today in %s"
              (length messages) bs-mu4e-context-buffer-name)))
 
