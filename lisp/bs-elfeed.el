@@ -31,6 +31,7 @@
 (require 'bs-lib)
 (require 'dom)
 (require 'elfeed)
+(require 'elfeed-db)
 (require 'elfeed-search)
 (require 'shr)
 (require 'subr-x)
@@ -94,9 +95,9 @@
 
 (defcustom bs-elfeed-search-context-hook nil
   "Hook run after preparing an Elfeed context.
-The hook runs in the originating Search buffer while the buffer
-named by `bs-elfeed-context-buffer-name' contains the selected
-entries."
+The hook runs in the originating Search or Tree buffer while the buffer
+named by `bs-elfeed-context-buffer-name' contains the selected or
+today's entries."
   :type 'hook
   :group 'bs-elfeed)
 
@@ -458,6 +459,97 @@ standard behaviors."
         (bs-elfeed--render-html content)
       (string-trim content))))
 
+(defun bs-elfeed--today-bounds ()
+  "Return today's local-time bounds as epoch seconds."
+  (pcase-let* ((`(,_second ,_minute ,_hour ,day ,month ,year . ,_)
+                (decode-time))
+               (start (encode-time 0 0 0 day month year)))
+    (cons (float-time start)
+          (float-time (time-add start (days-to-time 1))))))
+
+(defun bs-elfeed--today-entries ()
+  "Return today's locally stored Elfeed entries in chronological order."
+  (pcase-let ((`(,start . ,end) (bs-elfeed--today-bounds)))
+    (let (entries)
+      ;; `elfeed-db-visit' walks newest first, so pushing produces the
+      ;; chronological order wanted inside each feed group.
+      (elfeed-db-visit (entry)
+                       (let ((date (elfeed-entry-date entry)))
+                         (cond
+                          ((>= date end))
+                          ((>= date start)
+                           (push entry entries))
+                          (t
+                           (elfeed-db-return)))))
+      entries)))
+
+(defun bs-elfeed--entries-by-feed (entries)
+  "Group chronological ENTRIES by feed in first-entry order."
+  (let ((table (make-hash-table :test #'equal))
+        order)
+    (dolist (entry entries)
+      (let ((feed-id (elfeed-entry-feed-id entry)))
+        (unless (gethash feed-id table)
+          (push feed-id order))
+        (puthash feed-id
+                 (cons entry (gethash feed-id table))
+                 table)))
+    (mapcar
+     (lambda (feed-id)
+       (let ((feed-entries (nreverse (gethash feed-id table))))
+         (cons (elfeed-entry-feed (car feed-entries))
+               feed-entries)))
+     (nreverse order))))
+
+(defun bs-elfeed--insert-today-entry (entry index count)
+  "Insert locally stored ENTRY numbered INDEX out of COUNT."
+  (let ((content (or (bs-elfeed--entry-text entry) "")))
+    (insert
+     (format "\n### Entry %d of %d\n\n" index count)
+     (format "Title: %s\n"
+             (or (elfeed-entry-title entry) "[untitled]"))
+     (format "Date: %s\n"
+             (format-time-string
+              "%F %T %z"
+              (seconds-to-time (elfeed-entry-date entry))))
+     (format "URL: %s\n\n"
+             (or (elfeed-entry-link entry) "[none]"))
+     (if (string-empty-p content)
+         "[Article body was not cached locally.]"
+       content)
+     "\n")))
+
+(defun bs-elfeed--build-today-context (entries)
+  "Build and return an Elfeed context buffer from today's ENTRIES."
+  (let ((groups (bs-elfeed--entries-by-feed entries)))
+    (with-current-buffer
+        (get-buffer-create bs-elfeed-context-buffer-name)
+      (fundamental-mode)
+      (erase-buffer)
+      (insert "# Today's Feed Context\n\n"
+              "Source: Entire local Elfeed database\n\n"
+              (format "Feeds: %d\n" (length groups))
+              (format "Entries: %d\n" (length entries)))
+      (cl-loop
+       for group in groups
+       for feed = (car group)
+       for feed-entries = (cdr group)
+       for feed-index from 1
+       do
+       (insert
+        (format "\n## Feed %d of %d: %s\n"
+                feed-index (length groups)
+                (or (and feed (elfeed-feed-title feed))
+                    (and feed (elfeed-feed-url feed))
+                    "[unknown]")))
+       (cl-loop
+        for entry in feed-entries
+        for entry-index from 1
+        do (bs-elfeed--insert-today-entry
+            entry entry-index (length feed-entries))))
+      (set-buffer-modified-p nil)
+      (current-buffer))))
+
 (defun bs-elfeed--build-context (request)
   "Build and return an Elfeed context buffer from REQUEST."
   (let* ((entries (bs-elfeed--request-entries request))
@@ -654,6 +746,26 @@ asynchronously when their feed content is too short."
       (mapc (lambda (entry)
               (bs-elfeed--prepare-entry request entry))
             entries))))
+
+;;;###autoload
+(defun bs-elfeed-prepare-today-context ()
+  "Prepare all of today's locally stored Elfeed entries as context.
+Group entries by feed and order each group chronologically.  Never
+update feeds or fetch linked pages."
+  (interactive)
+  (unless (derived-mode-p 'elfeed-search-mode 'elfeed-tree-mode)
+    (user-error "This command requires an Elfeed Search or Tree buffer"))
+  (let ((entries (bs-elfeed--today-entries)))
+    (unless entries
+      (user-error "No locally stored Elfeed entries from today"))
+    (bs-elfeed--build-today-context entries)
+    (if (derived-mode-p 'elfeed-search-mode)
+        (bs-elfeed--select-entry-line (car entries))
+      (goto-char (line-beginning-position))
+      (push-mark (line-end-position) nil t))
+    (run-hooks 'bs-elfeed-search-context-hook)
+    (message "Prepared %d Elfeed entries from today in %s"
+             (length entries) bs-elfeed-context-buffer-name)))
 
 (defun bs-elfeed--single-line (value fallback)
   "Return VALUE as a trimmed single line, or FALLBACK when empty."

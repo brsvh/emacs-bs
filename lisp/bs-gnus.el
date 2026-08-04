@@ -461,6 +461,14 @@ A value of zero disables batch insertion without changing
   :type 'string
   :group 'bs-gnus)
 
+(defcustom bs-gnus-today-context-maximum-length 900000
+  "Maximum number of characters in a Gnus today context.
+Article bodies share the available space equally after reserving
+space for context, thread, and article metadata.  This keeps the
+result below provider limits while retaining every article."
+  :type 'natnum
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-summary-display-thread-context nil
   "Whether to display the generated thread context buffer.
 When nil, keep the buffer named by `bs-gnus-context-buffer-name'
@@ -470,10 +478,10 @@ that buffer and select all of its text."
   :group 'bs-gnus)
 
 (defcustom bs-gnus-summary-thread-context-hook nil
-  "Hook run after preparing a Gnus thread context.
-The hook runs in the originating Summary buffer while the buffer
-named by `bs-gnus-context-buffer-name' contains the selected
-subthread."
+  "Hook run after preparing a Gnus context.
+The hook runs in the originating Summary or Group buffer while the
+buffer named by `bs-gnus-context-buffer-name' contains the selected
+subthread or today's articles."
   :type 'hook
   :group 'bs-gnus)
 
@@ -530,6 +538,16 @@ After exhausting the list, continue using its final delay."
   (* 90 24 60 60)
   "Seconds before a cached notification avatar expires."
   :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-notifications-delivery-interval 1
+  "Seconds between consecutive Gnus desktop notifications."
+  :type 'number
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-notifications-rate-limit-retry-delay 10
+  "Retry delay after desktop notification rate limiting, in seconds."
+  :type 'number
   :group 'bs-gnus)
 
 (defcustom bs-gnus-notifications-read-display-function
@@ -686,6 +704,16 @@ standard behaviors."
 
 (defvar bs-gnus--notifications-enabled nil
   "Non-nil when the background-update notification adapter is enabled.")
+
+(defvar bs-gnus--notifications-pending
+  (make-hash-table :test #'equal)
+  "Article keys queued for desktop notification delivery.")
+
+(defvar bs-gnus--notifications-queue nil
+  "Unread article records awaiting desktop notification delivery.")
+
+(defvar bs-gnus--notifications-timer nil
+  "Timer delivering queued desktop notifications serially.")
 
 (defvar bs-gnus--update-header-map
   (let ((map (make-sparse-keymap)))
@@ -1308,10 +1336,14 @@ pair containing the fetched body numbers and any errors."
 
 (defun bs-gnus--notifications-candidates (group)
   "Return unread GROUP articles not yet notified this session."
-  (seq-difference
-   (gnus-list-of-unread-articles group)
-   (bs-gnus--notifications-sent-articles group)
-   #'=))
+  (seq-remove
+   (lambda (article)
+     (gethash (cons group article)
+              bs-gnus--notifications-pending))
+   (seq-difference
+    (gnus-list-of-unread-articles group)
+    (bs-gnus--notifications-sent-articles group)
+    #'=)))
 
 (defun bs-gnus--update-sources ()
   "Return background-update requests grouped by remote NNTP source."
@@ -1888,8 +1920,22 @@ requested header numbers.  Return the numbers actually available."
     (push (list id group article)
           gnus-notifications-id-to-msg)))
 
-(defun bs-gnus--notifications-send (record)
-  "Notify the user about unread article RECORD if it remains eligible."
+(defun bs-gnus--notifications-key (record)
+  "Return the notification queue key for article RECORD."
+  (cons (plist-get record :group)
+        (plist-get record :article)))
+
+(defun bs-gnus--notifications-rate-limit-error-p (error-data)
+  "Return non-nil when ERROR-DATA reports desktop notification rate limiting."
+  (string-match-p
+   (regexp-quote
+    "org.freedesktop.Notifications.Error.ExcessNotificationGeneration")
+   (error-message-string error-data)))
+
+(defun bs-gnus--notifications-deliver (record)
+  "Deliver unread article RECORD if it remains eligible.
+Return `rate-limited' when the desktop notification service rejects
+the request temporarily."
   (when bs-gnus--notifications-enabled
     (let ((group (plist-get record :group))
           (article (plist-get record :article))
@@ -1901,15 +1947,60 @@ requested header numbers.  Return the numbers actually available."
                             (bs-gnus--notifications-sent-articles
                              group)))
                  (not (bs-gnus--notifications-own-address-p address)))
-        (when-let* ((id
-                     (gnus-notifications-notify
-                      (plist-get record :sender)
-                      (plist-get record :subject)
-                      (and-let* ((file
-                                  (plist-get record :photo-file)))
-                        (and (file-readable-p file) file)))))
-          (bs-gnus--notifications-mark-sent
-           group article id))))))
+        (condition-case error-data
+            (when-let* ((id
+                         (gnus-notifications-notify
+                          (plist-get record :sender)
+                          (plist-get record :subject)
+                          (and-let* ((file
+                                      (plist-get record :photo-file)))
+                            (and (file-readable-p file) file)))))
+              (bs-gnus--notifications-mark-sent
+               group article id)
+              'delivered)
+          (dbus-error
+           (if (bs-gnus--notifications-rate-limit-error-p error-data)
+               'rate-limited
+             (message "Failed to notify about Gnus article %d: %s"
+                      article (error-message-string error-data))
+             'failed))
+          (error
+           (message "Failed to notify about Gnus article %d: %s"
+                    article (error-message-string error-data))
+           'failed))))))
+
+(defun bs-gnus--notifications-schedule (delay)
+  "Schedule the next queued notification after DELAY seconds."
+  (unless (timerp bs-gnus--notifications-timer)
+    (setq bs-gnus--notifications-timer
+          (run-at-time
+           (max 0 delay) nil #'bs-gnus--notifications-dispatch))))
+
+(defun bs-gnus--notifications-dispatch ()
+  "Deliver the next queued notification and schedule its successor."
+  (setq bs-gnus--notifications-timer nil)
+  (when-let* ((record (pop bs-gnus--notifications-queue)))
+    (let* ((key (bs-gnus--notifications-key record))
+           (result (bs-gnus--notifications-deliver record)))
+      (if (eq result 'rate-limited)
+          (progn
+            (push record bs-gnus--notifications-queue)
+            (bs-gnus--notifications-schedule
+             bs-gnus-notifications-rate-limit-retry-delay))
+        (remhash key bs-gnus--notifications-pending)
+        (when bs-gnus--notifications-queue
+          (bs-gnus--notifications-schedule
+           bs-gnus-notifications-delivery-interval))))))
+
+(defun bs-gnus--notifications-send (record)
+  "Queue unread article RECORD for serial desktop notification delivery."
+  (when bs-gnus--notifications-enabled
+    (let ((key (bs-gnus--notifications-key record)))
+      (unless (gethash key bs-gnus--notifications-pending)
+        (puthash key t bs-gnus--notifications-pending)
+        (setq bs-gnus--notifications-queue
+              (nconc bs-gnus--notifications-queue (list record)))
+        (bs-gnus--notifications-schedule 0)))))
 
 (defun bs-gnus--notifications-read-and-position
     (function id key group article)
@@ -2224,6 +2315,11 @@ Open mapped Read actions using the configured display function."
   "Disable notifications without clearing this session's sent state."
   (interactive)
   (setq bs-gnus--notifications-enabled nil)
+  (when (timerp bs-gnus--notifications-timer)
+    (cancel-timer bs-gnus--notifications-timer))
+  (setq bs-gnus--notifications-timer nil
+        bs-gnus--notifications-queue nil)
+  (clrhash bs-gnus--notifications-pending)
   (advice-remove
    'gnus-notifications-action
    #'bs-gnus--notifications-action-with-display-function))
@@ -4164,6 +4260,220 @@ Return non-nil when the Summary gained at least one article."
       (set-buffer-modified-p nil)
       (current-buffer))))
 
+(defun bs-gnus--today-bounds ()
+  "Return today's local-time bounds as epoch seconds."
+  (pcase-let* ((`(,_second ,_minute ,_hour ,day ,month ,year . ,_)
+                (decode-time))
+               (start (encode-time 0 0 0 day month year)))
+    (cons (float-time start)
+          (float-time (time-add start (days-to-time 1))))))
+
+(defun bs-gnus--today-overview-records
+    (file group method start end)
+  "Return today's records from overview FILE for GROUP and METHOD.
+START and END are epoch seconds bounding the local calendar day."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let (records)
+        (while (not (eobp))
+          (let* ((line
+                  (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position)))
+                 (fields (split-string line "\t" nil))
+                 (article (and (car fields)
+                               (string-to-number (car fields))))
+                 (date (nth 3 fields))
+                 (timestamp
+                  (and date
+                       (condition-case nil
+                           (float-time (date-to-time date))
+                         (error nil)))))
+            (when (and (>= (length fields) 6)
+                       (> article 0)
+                       timestamp
+                       (<= start timestamp)
+                       (< timestamp end))
+              (push
+               (list :group group
+                     :method method
+                     :article article
+                     :subject
+                     (bs-gnus--update-worker-decode-header
+                      (nth 1 fields))
+                     :from
+                     (bs-gnus--update-worker-decode-header
+                      (nth 2 fields))
+                     :date date
+                     :timestamp timestamp
+                     :message-id (nth 4 fields)
+                     :references (nth 5 fields))
+               records)))
+          (forward-line 1))
+        (nreverse records)))))
+
+(defun bs-gnus--today-records ()
+  "Return today's locally indexed articles from subscribed Gnus groups."
+  (pcase-let ((`(,start . ,end) (bs-gnus--today-bounds)))
+    (let (records)
+      (dolist (info (cdr gnus-newsrc-alist))
+        (when (<= (gnus-info-level info) gnus-level-subscribed)
+          (let* ((group (gnus-info-group info))
+                 (method (gnus-find-method-for-group group)))
+            (when (gnus-agent-method-p method)
+              (setq records
+                    (nconc
+                     records
+                     (bs-gnus--today-overview-records
+                      (bs-gnus--update-agent-file
+                       gnus-agent-directory method group ".overview")
+                      group method start end)))))))
+      (sort records
+            (lambda (left right)
+              (< (plist-get left :timestamp)
+                 (plist-get right :timestamp)))))))
+
+(defun bs-gnus--context-subject (record)
+  "Return RECORD's subject without common reply prefixes."
+  (replace-regexp-in-string
+   "\\`\\(?:\\(?:re\\|fwd?\\):[ \\t]*\\)+" ""
+   (or (plist-get record :subject) "[no subject]") t t))
+
+(defun bs-gnus--context-thread-key (record)
+  "Return a stable thread key for Gnus overview RECORD."
+  (or (car (split-string (or (plist-get record :references) "")))
+      (let ((message-id (plist-get record :message-id)))
+        (and (not (string-empty-p (or message-id "")))
+             message-id))
+      (downcase (bs-gnus--context-subject record))))
+
+(defun bs-gnus--records-by-thread (records)
+  "Group chronological Gnus RECORDS by thread in first-article order."
+  (let ((table (make-hash-table :test #'equal))
+        order)
+    (dolist (record records)
+      (let ((key (bs-gnus--context-thread-key record)))
+        (unless (gethash key table)
+          (push key order))
+        (puthash key (cons record (gethash key table)) table)))
+    (mapcar
+     (lambda (key)
+       (nreverse (gethash key table)))
+     (nreverse order))))
+
+(defun bs-gnus--context-article-fallback (record &optional error-data)
+  "Return metadata for unavailable article RECORD.
+When ERROR-DATA is non-nil, include its local rendering error."
+  (format
+   (concat "From: %s\nSubject: %s\nDate: %s\n"
+           "Message-ID: %s\nNewsgroup: %s\nArticle: %d\n\n%s")
+   (or (plist-get record :from) "[unknown]")
+   (or (plist-get record :subject) "[no subject]")
+   (or (plist-get record :date) "[unknown]")
+   (or (plist-get record :message-id) "[none]")
+   (plist-get record :group)
+   (plist-get record :article)
+   (if error-data
+       (format "[Article body could not be rendered locally: %s]"
+               (error-message-string error-data))
+     "[Article body was not cached locally.]")))
+
+(defun bs-gnus--render-context-record (source record)
+  "Render Gnus overview RECORD using SOURCE buffer settings."
+  (condition-case error-data
+      (let ((gnus-command-method (plist-get record :method))
+            (group (plist-get record :group))
+            (article (plist-get record :article)))
+        (if (bs-gnus--summary-agent-article-available-p group article)
+            (bs-gnus--summary-render-agent-article
+             source group article)
+          (bs-gnus--context-article-fallback record)))
+    (error
+     (bs-gnus--context-article-fallback record error-data))))
+
+(defun bs-gnus--build-today-context (source records)
+  "Build and return a Gnus context from today's RECORDS using SOURCE."
+  (let* ((threads (bs-gnus--records-by-thread records))
+         (thread-count (length threads))
+         (article-count (length records))
+         (preamble
+          (concat
+           "# Today's Gnus Context\n\n"
+           "Source: All subscribed groups in the local Gnus Agent\n\n"
+           (format "Threads: %d\n" thread-count)
+           (format "Articles: %d\n" article-count)))
+         (sections
+          (cl-loop
+           for thread in threads
+           for thread-index from 1
+           for groups = (delete-dups
+                         (mapcar
+                          (lambda (record)
+                            (plist-get record :group))
+                          thread))
+           collect
+           (cons
+            (concat
+             (format "\n## Thread %d of %d: %s\n\n"
+                     thread-index thread-count
+                     (bs-gnus--context-subject (car thread)))
+             (format "Newsgroups: %s\n"
+                     (mapconcat #'identity groups ", ")))
+            (cl-loop
+             for record in thread
+             for article-index from 1
+             collect
+             (cons
+              (format "\n### Article %d of %d\n\n"
+                      article-index (length thread))
+              record)))))
+         (fixed-length
+          (+ (length preamble)
+             (cl-loop
+              for (thread-heading . articles) in sections
+              sum
+              (+ (length thread-heading)
+                 (cl-loop
+                  for article in articles
+                  sum (1+ (length (car article))))))))
+         (body-budget
+          (if (zerop article-count)
+              0
+            (/ (max 0
+                    (- bs-gnus-today-context-maximum-length
+                       fixed-length))
+               article-count)))
+         (truncation
+          "\n\n[Article body truncated to fit context budget.]"))
+    (when (> fixed-length bs-gnus-today-context-maximum-length)
+      (user-error
+       "Gnus today context metadata needs %d characters; budget is %d"
+       fixed-length bs-gnus-today-context-maximum-length))
+    (with-current-buffer
+        (get-buffer-create bs-gnus-context-buffer-name)
+      (fundamental-mode)
+      (erase-buffer)
+      (insert preamble)
+      (dolist (section sections)
+        (insert (car section))
+        (dolist (article (cdr section))
+          (let ((rendered
+                 (bs-gnus--render-context-record source (cdr article))))
+            (insert
+             (car article)
+             (if (> (length rendered) body-budget)
+                 (concat
+                  (substring
+                   rendered 0
+                   (max 0 (- body-budget (length truncation))))
+                  (substring
+                   truncation 0 (min body-budget (length truncation))))
+               rendered)
+             "\n"))))
+      (set-buffer-modified-p nil)
+      (current-buffer))))
+
 ;;;###autoload
 (defun bs-gnus-summary-mark-subthread ()
   "Prepare the article at point and its replies as thread context.
@@ -4214,6 +4524,27 @@ buffer hidden by default, select the current Summary row, and run
         (message "Prepared %d Gnus articles in %s"
                  (length articles)
                  bs-gnus-context-buffer-name)))))
+
+;;;###autoload
+(defun bs-gnus-prepare-today-context ()
+  "Prepare today's local articles from a Gnus Group or Summary buffer.
+Group articles by thread and order each thread chronologically.
+Read only Agent overview and body data without contacting any news
+server."
+  (interactive)
+  (unless (derived-mode-p 'gnus-group-mode 'gnus-summary-mode)
+    (user-error "This command requires a Gnus Group or Summary buffer"))
+  (require 'gnus-agent)
+  (unless gnus-agent
+    (user-error "Gnus Agent is not enabled"))
+  (let* ((source (current-buffer))
+         (records (bs-gnus--today-records)))
+    (unless records
+      (user-error "No locally indexed Gnus articles from today"))
+    (bs-gnus--build-today-context source records)
+    (run-hooks 'bs-gnus-summary-thread-context-hook)
+    (message "Prepared %d Gnus articles from today in %s"
+             (length records) bs-gnus-context-buffer-name)))
 
 (defun bs-gnus--summary-install ()
   "Install the custom Gnus Summary renderer."

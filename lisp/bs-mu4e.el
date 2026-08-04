@@ -122,6 +122,7 @@
 (defvar mu4e--view-message)
 (defvar mu4e-compose-context-policy)
 (defvar mu4e-context-changed-hook)
+(defvar mu4e-drafts-folder)
 (defvar mu4e-found-func)
 (defvar mu4e-headers-append-func)
 (defvar mu4e-headers-date-format)
@@ -133,6 +134,7 @@
 (defvar mu4e-headers-visible-flags)
 (defvar mu4e-index-update-error-continue)
 (defvar mu4e-main-buffer-name)
+(defvar mu4e-mu-binary)
 (defvar mu4e-mu-version)
 (defvar mu4e-remove-func)
 (defvar mu4e-search-hide-enabled)
@@ -140,6 +142,7 @@
 (defvar mu4e-search-threads)
 (defvar mu4e-update-func)
 (defvar mu4e-use-fancy-chars)
+(defvar mu4e-trash-folder)
 (defvar smtpmail-queue-mail)
 (defvar smtpmail-queue-dir)
 (defvar mu4e-view-fields)
@@ -149,6 +152,7 @@
 (defvar mu4e~headers-thread-state)
 (defvar mu4e~headers-view-win)
 (defvar mu4e~highlighted-docid)
+(defvar read-eval)
 (defvar xwidget-webkit-last-session-buffer)
 
 (defgroup bs-mu4e nil
@@ -1145,10 +1149,10 @@ that buffer and select all of its text."
   :group 'bs-mu4e)
 
 (defcustom bs-mu4e-headers-thread-context-hook nil
-  "Hook run after preparing a Mu4e thread context.
-The hook runs in the originating Headers buffer while the buffer
-named by `bs-mu4e-context-buffer-name' contains the selected
-subthread."
+  "Hook run after preparing a Mu4e context.
+The hook runs in the originating Headers or Main buffer while the
+buffer named by `bs-mu4e-context-buffer-name' contains the selected
+subthread or today's messages."
   :type 'hook
   :group 'bs-mu4e)
 
@@ -3036,6 +3040,158 @@ Search backwards when BACKWARDS is non-nil."
         (buffer-substring-no-properties
          (point-min) (point-max)))))))
 
+(defun bs-mu4e--today-query ()
+  "Return a query for today's messages in the active Mu4e context."
+  (let ((folders
+         (delete-dups
+          (delq nil
+                (mapcar
+                 (lambda (folder)
+                   (and (stringp folder)
+                        (not (string-empty-p folder))
+                        folder))
+                 (list
+                  (and (boundp 'mu4e-drafts-folder)
+                       mu4e-drafts-folder)
+                  (and (boundp 'mu4e-trash-folder)
+                       mu4e-trash-folder)))))))
+    (concat
+     (unless (string-empty-p bs-mu4e-context-query)
+       (format "(%s) AND " bs-mu4e-context-query))
+     "(date:today..now)"
+     (when folders
+       (format " AND NOT (%s)"
+               (mapconcat
+                (lambda (folder)
+                  (format "maildir:%S" folder))
+                folders " OR "))))))
+
+(defun bs-mu4e--read-sexp-message (line)
+  "Read one Mu S-expression message from LINE."
+  (let* ((read-eval nil)
+         (message (car (read-from-string line))))
+    (unless (listp message)
+      (error "Invalid Mu message output: %s" line))
+    message))
+
+(defun bs-mu4e--today-messages (query)
+  "Return Mu4e messages matching today's QUERY in chronological order."
+  (let* ((binary
+          (or (and (boundp 'mu4e-mu-binary) mu4e-mu-binary)
+              "mu"))
+         (messages
+          (mapcar
+           #'bs-mu4e--read-sexp-message
+           (process-lines binary "find" "--format=sexp"
+                          "--skip-dups" "--sortfield=date" query))))
+    (sort messages
+          (lambda (left right)
+            (time-less-p
+             (or (mu4e-message-field left :date) 0)
+             (or (mu4e-message-field right :date) 0))))))
+
+(defun bs-mu4e--context-subject (message)
+  "Return MESSAGE's subject without common reply prefixes."
+  (let ((subject
+         (or (mu4e-message-field message :subject) "[no subject]")))
+    (replace-regexp-in-string
+     "\\`\\(?:\\(?:re\\|fwd?\\):[ \\t]*\\)+" ""
+     subject t t)))
+
+(defun bs-mu4e--context-thread-key (message)
+  "Return a stable thread key for Mu4e MESSAGE."
+  (or (car (mu4e-message-field message :references))
+      (mu4e-message-field message :message-id)
+      (downcase (bs-mu4e--context-subject message))
+      (mu4e-message-field message :path)))
+
+(defun bs-mu4e--messages-by-thread (messages)
+  "Group chronological MESSAGES by thread in first-message order."
+  (let ((table (make-hash-table :test #'equal))
+        order)
+    (dolist (message messages)
+      (let ((key (bs-mu4e--context-thread-key message)))
+        (unless (gethash key table)
+          (push key order))
+        (puthash key (cons message (gethash key table)) table)))
+    (mapcar
+     (lambda (key)
+       (nreverse (gethash key table)))
+     (nreverse order))))
+
+(defun bs-mu4e--context-contact (contact)
+  "Return a readable string for Mu4e CONTACT."
+  (let ((name (and (listp contact) (plist-get contact :name)))
+        (email (and (listp contact) (plist-get contact :email))))
+    (cond
+     ((and name email) (format "%s <%s>" name email))
+     (email email)
+     (name name)
+     (t (format "%s" contact)))))
+
+(defun bs-mu4e--context-contacts (contacts)
+  "Return a readable string for Mu4e CONTACTS."
+  (if contacts
+      (mapconcat #'bs-mu4e--context-contact contacts ", ")
+    "[none]"))
+
+(defun bs-mu4e--context-message-fallback (message error-data)
+  "Return metadata for MESSAGE whose body failed with ERROR-DATA."
+  (format
+   (concat "From: %s\nTo: %s\nSubject: %s\nDate: %s\n"
+           "Message-ID: %s\n\n"
+           "[Message body was not available locally: %s]")
+   (bs-mu4e--context-contacts
+    (mu4e-message-field message :from))
+   (bs-mu4e--context-contacts
+    (mu4e-message-field message :to))
+   (or (mu4e-message-field message :subject) "[no subject]")
+   (if-let* ((date (mu4e-message-field message :date)))
+       (format-time-string "%F %T %z" date)
+     "[unknown]")
+   (or (mu4e-message-field message :message-id) "[none]")
+   (error-message-string error-data)))
+
+(defun bs-mu4e--render-context-message (message)
+  "Render MESSAGE, retaining metadata when its local body is unavailable."
+  (condition-case error-data
+      (bs-mu4e--headers-render-message message)
+    (error
+     (bs-mu4e--context-message-fallback message error-data))))
+
+(defun bs-mu4e--build-today-context (messages query)
+  "Build and return a Mu4e context for today's MESSAGES from QUERY."
+  (let ((threads (bs-mu4e--messages-by-thread messages)))
+    (with-current-buffer
+        (get-buffer-create bs-mu4e-context-buffer-name)
+      (fundamental-mode)
+      (erase-buffer)
+      (insert "# Today's Mail Context\n\n"
+              (format "Source: Mu4e context `%s`\n\n"
+                      bs-mu4e-context-name)
+              (format "Query: `%s`\n\n" query)
+              (format "Threads: %d\n" (length threads))
+              (format "Messages: %d\n" (length messages)))
+      (cl-loop
+       for thread in threads
+       for thread-index from 1
+       do
+       (insert
+        (format "\n## Thread %d of %d: %s\n"
+                thread-index (length threads)
+                (bs-mu4e--context-subject (car thread))))
+       (cl-loop
+        for message in thread
+        for message-index from 1
+        do
+        (insert
+         (format "\n### Message %d of %d\n\n"
+                 message-index (length thread))
+         (bs-mu4e--render-context-message message)
+         "\n")))
+      (set-buffer-modified-p nil)
+      (current-buffer))))
+
 (defun bs-mu4e--headers-build-thread-context (messages query)
   "Build a thread context for MESSAGES from Mu4e QUERY."
   (let ((texts (mapcar #'bs-mu4e--headers-render-message messages))
@@ -3097,6 +3253,25 @@ default, select the current Headers row, and run
         (message "Prepared %d Mu4e messages in %s"
                  (length messages)
                  bs-mu4e-context-buffer-name)))))
+
+;;;###autoload
+(defun bs-mu4e-prepare-today-context ()
+  "Prepare today's local messages from a Mu4e Main or Headers buffer.
+Include received and sent mail while excluding the context's draft
+and trash folders.  Group messages by thread and order each thread
+chronologically without updating mail or the Mu database."
+  (interactive)
+  (unless (derived-mode-p 'mu4e-main-mode 'mu4e-headers-mode)
+    (user-error "This command requires a Mu4e Main or Headers buffer"))
+  (let* ((query (bs-mu4e--today-query))
+         (messages (bs-mu4e--today-messages query)))
+    (unless messages
+      (user-error "No Mu4e messages from today in context %s"
+                  bs-mu4e-context-name))
+    (bs-mu4e--build-today-context messages query)
+    (run-hooks 'bs-mu4e-headers-thread-context-hook)
+    (message "Prepared %d Mu4e messages from today in %s"
+             (length messages) bs-mu4e-context-buffer-name)))
 
 (defun bs-mu4e--headers-resize-render (buffer)
   "Rerender visible headers BUFFER after a debounced resize."
