@@ -3157,7 +3157,7 @@ DESCRIPTION identifies the selected Mu4e scope."
       (current-buffer))))
 
 ;;;###autoload
-(defun bs-mu4e-headers-mark-subthread ()
+(defun bs-mu4e-headers-prepare-subthread-context ()
   "Prepare the message at point and its replies as thread context.
 Render every message before replacing the buffer named by
 `bs-mu4e-context-buffer-name'.  Keep that buffer hidden by

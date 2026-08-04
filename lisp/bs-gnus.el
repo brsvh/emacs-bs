@@ -4371,7 +4371,7 @@ DESCRIPTION identifies the selected Gnus scope."
       (current-buffer))))
 
 ;;;###autoload
-(defun bs-gnus-summary-mark-subthread ()
+(defun bs-gnus-summary-prepare-subthread-context ()
   "Prepare the article at point and its replies as thread context.
 Download every article to the Gnus Agent before replacing
 the buffer named by `bs-gnus-context-buffer-name'.  Keep that
