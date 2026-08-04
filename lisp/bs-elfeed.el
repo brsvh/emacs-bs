@@ -468,18 +468,27 @@ standard behaviors."
         (bs-elfeed--render-html content)
       (string-trim content))))
 
-(defun bs-elfeed--today-entries ()
-  "Return today's locally stored Elfeed entries in chronological order."
+(defun bs-elfeed--today-entries (&optional filter)
+  "Return today's locally stored Elfeed entries in chronological order.
+When FILTER is non-nil, apply that Elfeed Search filter while visiting
+the database."
   (pcase-let ((`(,start . ,end) (bs-today-time-bounds)))
-    (let (entries)
+    (let ((filter (and filter (elfeed-search-parse-filter filter)))
+          (count 0)
+          (now (float-time))
+          entries)
       ;; `elfeed-db-visit' walks newest first, so pushing produces the
       ;; chronological order wanted inside each feed group.
-      (elfeed-db-visit (entry)
+      (elfeed-db-visit (entry feed)
                        (let ((date (elfeed-entry-date entry)))
                          (cond
-                          ((>= date end))
                           ((>= date start)
-                           (push entry entries))
+                           (when (or (null filter)
+                                     (elfeed-search-filter
+                                      filter entry feed count now))
+                             (setq count (1+ count))
+                             (when (< date end)
+                               (push entry entries))))
                           (t
                            (elfeed-db-return)))))
       entries)))
@@ -510,15 +519,17 @@ standard behaviors."
        content)
      "\n")))
 
-(defun bs-elfeed--build-today-context (entries)
-  "Build and return an Elfeed context buffer from today's ENTRIES."
+(defun bs-elfeed--build-today-context (entries &optional source)
+  "Build and return an Elfeed context buffer from today's ENTRIES.
+SOURCE describes the selected Elfeed scope."
   (let ((groups (bs-elfeed--entries-by-feed entries)))
     (with-current-buffer
         (get-buffer-create bs-elfeed-context-buffer-name)
       (fundamental-mode)
       (erase-buffer)
       (insert "# Today's Feed Context\n\n"
-              "Source: Entire local Elfeed database\n\n"
+              (format "Source: %s\n\n"
+                      (or source "Entire local Elfeed database"))
               (format "Feeds: %d\n" (length groups))
               (format "Entries: %d\n" (length entries)))
       (cl-loop
@@ -540,6 +551,65 @@ standard behaviors."
             entry entry-index (length feed-entries))))
       (set-buffer-modified-p nil)
       (current-buffer))))
+
+(defun bs-elfeed--tree-heading-level-at-point ()
+  "Return the Tree heading level at point, or nil on a feed row."
+  (when (get-text-property
+         (line-beginning-position) 'bs-elfeed-tree-heading)
+    (save-excursion
+      (beginning-of-line)
+      (when (looking-at "\\*+")
+        (- (match-end 0) (match-beginning 0))))))
+
+(defun bs-elfeed--tree-subtree-feeds ()
+  "Return the feeds represented by the Tree row at point.
+On a feed row, return that feed.  On a topic row, return every feed
+below that topic, stopping at the next topic of the same or a lower
+outline level."
+  (let* ((position (line-beginning-position))
+         (feed (get-text-property position 'elfeed-feed))
+         (level (bs-elfeed--tree-heading-level-at-point)))
+    (cond
+     (feed (list feed))
+     (level
+      (let (feeds)
+        (save-excursion
+          (forward-line 1)
+          (while (and (not (eobp))
+                      (let ((next-level
+                             (bs-elfeed--tree-heading-level-at-point)))
+                        (or (null next-level)
+                            (> next-level level))))
+            (when-let* ((child-feed
+                         (get-text-property
+                          (line-beginning-position) 'elfeed-feed)))
+              (push child-feed feeds))
+            (forward-line 1)))
+        (nreverse feeds)))
+     (t
+      (user-error "Point is not on an Elfeed Tree topic or feed")))))
+
+(defun bs-elfeed--tree-scope-at-point ()
+  "Return the current Tree scope as (DESCRIPTION . FEED-IDS)."
+  (let* ((position (line-beginning-position))
+         (feed (get-text-property position 'elfeed-feed))
+         (tree (get-text-property position 'elfeed-tree))
+         (feeds (bs-elfeed--tree-subtree-feeds))
+         (description
+          (if feed
+              (format "Elfeed Tree feed `%s`" (elfeed-feed-id feed))
+            (if (string-empty-p tree)
+                (format "Elfeed Tree root `%s`"
+                        bs-elfeed-tree-root-name)
+              (format "Elfeed Tree topic `%s`" tree)))))
+    (cons description (mapcar #'elfeed-feed-id feeds))))
+
+(defun bs-elfeed--entries-in-tree-scope (entries feed-ids)
+  "Return ENTRIES whose feed identifier belongs to FEED-IDS."
+  (cl-remove-if-not
+   (lambda (entry)
+     (member (elfeed-entry-feed-id entry) feed-ids))
+   entries))
 
 (defun bs-elfeed--build-context (request)
   "Build and return an Elfeed context buffer from REQUEST."
@@ -740,23 +810,41 @@ asynchronously when their feed content is too short."
 
 ;;;###autoload
 (defun bs-elfeed-prepare-today-context ()
-  "Prepare all of today's locally stored Elfeed entries as context.
+  "Prepare today's locally stored Elfeed entries as context.
+In a Tree buffer, limit entries to the feed at point or all feeds
+below the topic at point; the root topic includes the whole tree.
+In a Search buffer, apply the buffer's current Search filter.
 Group entries by feed and order each group chronologically.  Never
-update feeds or fetch linked pages."
+update feeds or fetch linked pages.  Leave point unchanged and
+deactivate any active region."
   (interactive)
   (unless (derived-mode-p 'elfeed-search-mode 'elfeed-tree-mode)
     (user-error "This command requires an Elfeed Search or Tree buffer"))
-  (let ((entries (bs-elfeed--today-entries)))
+  (let* ((tree-scope
+          (and (derived-mode-p 'elfeed-tree-mode)
+               (bs-elfeed--tree-scope-at-point)))
+         (search-filter
+          (and (derived-mode-p 'elfeed-search-mode)
+               elfeed-search-filter))
+         (source
+          (or (car tree-scope)
+              (and search-filter
+                   (format "Elfeed Search filter `%s`" search-filter))
+              "Entire local Elfeed database"))
+         (entries (bs-elfeed--today-entries search-filter))
+         (entries
+          (if tree-scope
+              (bs-elfeed--entries-in-tree-scope
+               entries (cdr tree-scope))
+            entries)))
     (unless entries
-      (user-error "No locally stored Elfeed entries from today"))
-    (bs-elfeed--build-today-context entries)
-    (if (derived-mode-p 'elfeed-search-mode)
-        (bs-elfeed--select-entry-line (car entries))
-      (goto-char (line-beginning-position))
-      (push-mark (line-end-position) nil t))
+      (user-error "No locally stored Elfeed entries from today in %s"
+                  source))
+    (bs-elfeed--build-today-context entries source)
+    (deactivate-mark)
     (run-hooks 'bs-elfeed-search-context-hook)
-    (message "Prepared %d Elfeed entries from today in %s"
-             (length entries) bs-elfeed-context-buffer-name)))
+    (message "Prepared %d Elfeed entries from today in %s (%s)"
+             (length entries) bs-elfeed-context-buffer-name source)))
 
 (defun bs-elfeed--buffer-width (fallback)
   "Return the displayed width of the current buffer, or FALLBACK."

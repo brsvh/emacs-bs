@@ -498,6 +498,7 @@ RENDER-WIDTH control layout.  ACTION-P uses the ordinary name face."
     (insert
      (propertize
       line
+      'bs-mu4e-main-item count
       'bs-mu4e-main-command (bs-mu4e--main-row-command command)
       'mouse-face 'highlight)
      ?\n)))
@@ -2992,31 +2993,35 @@ Search backwards when BACKWARDS is non-nil."
         (buffer-substring-no-properties
          (point-min) (point-max)))))))
 
-(defun bs-mu4e--today-query ()
-  "Return a query for today's messages in the active Mu4e context."
-  (let ((folders
-         (delete-dups
-          (delq nil
-                (mapcar
-                 (lambda (folder)
-                   (and (stringp folder)
-                        (not (string-empty-p folder))
-                        folder))
-                 (list
-                  (and (boundp 'mu4e-drafts-folder)
-                       mu4e-drafts-folder)
-                  (and (boundp 'mu4e-trash-folder)
-                       mu4e-trash-folder)))))))
-    (concat
-     (unless (string-empty-p bs-mu4e-context-query)
-       (format "(%s) AND " bs-mu4e-context-query))
-     "(date:today..now)"
-     (when folders
-       (format " AND NOT (%s)"
-               (mapconcat
-                (lambda (folder)
-                  (format "maildir:%S" folder))
-                folders " OR "))))))
+(defun bs-mu4e--today-query (base-query)
+  "Return today's Mu query restricted by BASE-QUERY."
+  (concat
+   (unless (string-empty-p (or base-query ""))
+     (format "(%s) AND " base-query))
+   "(date:today..now)"))
+
+(defun bs-mu4e--today-context-scope ()
+  "Return the Mu4e context scope at point as a plist."
+  (if (derived-mode-p 'mu4e-headers-mode)
+      (list :description "Mu4e Headers query"
+            :query (bs-mu4e--headers-query))
+    (let* ((position (line-beginning-position))
+           (item (get-text-property position 'bs-mu4e-main-item))
+           (query (and item (plist-get item :query))))
+      (if query
+          (if (plist-get item :bs-maildir)
+              (list
+               :description
+               (format "Mu4e maildir `%s`"
+                       (plist-get item :maildir))
+               :query query)
+            (list
+             :description
+             (format "Mu4e bookmark `%s`" (plist-get item :name))
+             :query query))
+        (list :description
+              (format "Mu4e context `%s`" bs-mu4e-context-name)
+              :query bs-mu4e-context-query)))))
 
 (defun bs-mu4e--read-sexp-message (line)
   "Read one Mu S-expression message from LINE."
@@ -3095,16 +3100,19 @@ Search backwards when BACKWARDS is non-nil."
     (error
      (bs-mu4e--context-message-fallback message error-data))))
 
-(defun bs-mu4e--build-today-context (messages query)
-  "Build and return a Mu4e context for today's MESSAGES from QUERY."
+(defun bs-mu4e--build-today-context (messages query &optional description)
+  "Build and return a Mu4e context for today's MESSAGES from QUERY.
+DESCRIPTION identifies the selected Mu4e scope."
   (let ((threads (bs-mu4e--messages-by-thread messages)))
     (with-current-buffer
         (get-buffer-create bs-mu4e-context-buffer-name)
       (fundamental-mode)
       (erase-buffer)
       (insert "# Today's Mail Context\n\n"
-              (format "Source: Mu4e context `%s`\n\n"
-                      bs-mu4e-context-name)
+              (format "Source: %s\n\n"
+                      (or description
+                          (format "Mu4e context `%s`"
+                                  bs-mu4e-context-name)))
               (format "Query: `%s`\n\n" query)
               (format "Threads: %d\n" (length threads))
               (format "Messages: %d\n" (length messages)))
@@ -3128,22 +3136,6 @@ Search backwards when BACKWARDS is non-nil."
          "\n")))
       (set-buffer-modified-p nil)
       (current-buffer))))
-
-(defun bs-mu4e--activate-context-source-line ()
-  "Activate a nonempty source line for the prepared Mu4e context."
-  (let ((bounds
-         (save-excursion
-           (beginning-of-line)
-           (if (re-search-forward
-                "[^[:space:]]" (line-end-position) t)
-               (cons (line-beginning-position) (line-end-position))
-             (goto-char (point-min))
-             (when (re-search-forward "[^[:space:]]" nil t)
-               (cons (line-beginning-position)
-                     (line-end-position)))))))
-    (when bounds
-      (goto-char (car bounds))
-      (push-mark (cdr bounds) nil t))))
 
 (defun bs-mu4e--headers-build-thread-context (messages query)
   "Build a thread context for MESSAGES from Mu4e QUERY."
@@ -3169,7 +3161,7 @@ Search backwards when BACKWARDS is non-nil."
   "Prepare the message at point and its replies as thread context.
 Render every message before replacing the buffer named by
 `bs-mu4e-context-buffer-name'.  Keep that buffer hidden by
-default, select the current Headers row, and run
+default, do not activate a region, and run
 `bs-mu4e-headers-thread-context-hook'."
   (interactive)
   (unless (and (derived-mode-p 'mu4e-headers-mode)
@@ -3195,37 +3187,40 @@ default, select the current Headers row, and run
             messages query)))
       (mu4e~headers-goto-docid docid)
       (run-hooks 'bs-mu4e-headers-thread-context-hook)
+      (deactivate-mark)
       (if bs-mu4e-headers-display-thread-context
           (progn
             (pop-to-buffer context)
-            (goto-char (point-min))
-            (push-mark (point-max) nil t))
+            (goto-char (point-min)))
         (mu4e~headers-goto-docid docid t)
         (move-to-column 2)
-        (push-mark (line-end-position) nil t)
         (message "Prepared %d Mu4e messages in %s"
                  (length messages)
-                 bs-mu4e-context-buffer-name)))))
+                 bs-mu4e-context-buffer-name))
+      (deactivate-mark))))
 
 ;;;###autoload
 (defun bs-mu4e-prepare-today-context ()
   "Prepare today's local messages from a Mu4e Main or Headers buffer.
-Include received and sent mail while excluding the context's draft
-and trash folders.  Group messages by thread and order each thread
-chronologically without updating mail or the Mu database."
+On a Main bookmark or maildir row, apply that row's query.  Elsewhere
+in Main, use the active context.  In Headers, apply the current search
+query.  Group messages by thread and order each thread chronologically
+without updating mail or the Mu database."
   (interactive)
   (unless (derived-mode-p 'mu4e-main-mode 'mu4e-headers-mode)
     (user-error "This command requires a Mu4e Main or Headers buffer"))
-  (let* ((query (bs-mu4e--today-query))
+  (let* ((scope (bs-mu4e--today-context-scope))
+         (description (plist-get scope :description))
+         (query (bs-mu4e--today-query (plist-get scope :query)))
          (messages (bs-mu4e--today-messages query)))
     (unless messages
-      (user-error "No Mu4e messages from today in context %s"
-                  bs-mu4e-context-name))
-    (bs-mu4e--build-today-context messages query)
+      (user-error "No Mu4e messages from today in %s" description))
+    (bs-mu4e--build-today-context messages query description)
+    (deactivate-mark)
     (run-hooks 'bs-mu4e-headers-thread-context-hook)
-    (bs-mu4e--activate-context-source-line)
-    (message "Prepared %d Mu4e messages from today in %s"
-             (length messages) bs-mu4e-context-buffer-name)))
+    (message "Prepared %d Mu4e messages from today in %s (%s)"
+             (length messages) bs-mu4e-context-buffer-name
+             description)))
 
 (defun bs-mu4e--headers-resize-render (buffer)
   "Rerender visible headers BUFFER after a debounced resize."

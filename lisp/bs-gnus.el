@@ -211,6 +211,7 @@
 (defvar gnus-topic-alist)
 (defvar gnus-topic-indent-level)
 (defvar gnus-topic-mode)
+(defvar gnus-topic-topology)
 (defvar gnus-tmp-thread-tree-header-string)
 (defvar gnus-tmp-internal-hook)
 (defvar gnus-tmp-unread)
@@ -4165,26 +4166,79 @@ START and END are epoch seconds bounding the local calendar day."
           (forward-line 1))
         (nreverse records)))))
 
-(defun bs-gnus--today-records ()
-  "Return today's locally indexed articles from subscribed Gnus groups."
+(defun bs-gnus--today-records (&optional groups)
+  "Return today's locally indexed articles from Gnus GROUPS.
+When GROUPS is nil, use every subscribed group."
   (pcase-let ((`(,start . ,end) (bs-today-time-bounds)))
-    (let (records)
-      (dolist (info (cdr gnus-newsrc-alist))
-        (when (<= (gnus-info-level info) gnus-level-subscribed)
-          (let* ((group (gnus-info-group info))
-                 (method (gnus-find-method-for-group group)))
-            (when (gnus-agent-method-p method)
-              (setq records
-                    (nconc
-                     records
-                     (bs-gnus--today-overview-records
-                      (bs-gnus--update-agent-file
-                       gnus-agent-directory method group ".overview")
-                      group method start end)))))))
+    (let ((groups
+           (or groups
+               (cl-loop
+                for info in (cdr gnus-newsrc-alist)
+                when (<= (gnus-info-level info) gnus-level-subscribed)
+                collect (gnus-info-group info))))
+          records)
+      (dolist (group (delete-dups (copy-sequence groups)))
+        (let ((method (gnus-find-method-for-group group)))
+          (when (gnus-agent-method-p method)
+            (setq records
+                  (nconc
+                   records
+                   (bs-gnus--today-overview-records
+                    (bs-gnus--update-agent-file
+                     gnus-agent-directory method group ".overview")
+                    group method start end))))))
       (sort records
             (lambda (left right)
               (< (plist-get left :timestamp)
                  (plist-get right :timestamp)))))))
+
+(defun bs-gnus--topic-subtree-groups (topic)
+  "Return every group assigned to TOPIC or one of its descendants."
+  (cl-labels
+      ((find-node
+         (node)
+         (if (equal topic (car (car node)))
+             node
+           (cl-some #'find-node (cdr node))))
+       (collect-groups
+         (node)
+         (nconc
+          (copy-sequence
+           (cdr (assoc (car (car node)) gnus-topic-alist)))
+          (cl-mapcan #'collect-groups (cdr node)))))
+    (let ((node
+           (and gnus-topic-topology
+                (find-node gnus-topic-topology))))
+      (delete-dups
+       (if node
+           (collect-groups node)
+         (copy-sequence (cdr (assoc topic gnus-topic-alist))))))))
+
+(defun bs-gnus--today-context-scope ()
+  "Return the context scope at point as (DESCRIPTION . GROUPS)."
+  (cond
+   ((derived-mode-p 'gnus-summary-mode)
+    (unless (and (stringp gnus-newsgroup-name)
+                 (not (string-empty-p gnus-newsgroup-name)))
+      (user-error "The current Summary buffer has no Gnus group"))
+    (cons (format "Gnus Summary group `%s`" gnus-newsgroup-name)
+          (list gnus-newsgroup-name)))
+   ((derived-mode-p 'gnus-group-mode)
+    (let* ((position (line-beginning-position))
+           (group (get-text-property position 'gnus-group))
+           (topic (get-text-property position 'gnus-topic))
+           (level (get-text-property position 'gnus-topic-level)))
+      (cond
+       (group
+        (cons (format "Gnus group `%s`" group) (list group)))
+       (topic
+        (cons
+         (if (and (numberp level) (zerop level))
+             (format "Gnus root `%s`" topic)
+           (format "Gnus topic `%s`" topic))
+         (bs-gnus--topic-subtree-groups topic)))
+       (t
+        (user-error "Point is not on a Gnus group or topic")))))))
 
 (defun bs-gnus--context-thread-key (record)
   "Return a stable thread key for Gnus overview RECORD."
@@ -4229,15 +4283,19 @@ When ERROR-DATA is non-nil, include its local rendering error."
     (error
      (bs-gnus--context-article-fallback record error-data))))
 
-(defun bs-gnus--build-today-context (source records)
-  "Build and return a Gnus context from today's RECORDS using SOURCE."
+(defun bs-gnus--build-today-context (source records &optional description)
+  "Build and return a Gnus context from today's RECORDS using SOURCE.
+DESCRIPTION identifies the selected Gnus scope."
   (let* ((threads (bs-gnus--records-by-thread records))
          (thread-count (length threads))
          (article-count (length records))
          (preamble
           (concat
            "# Today's Gnus Context\n\n"
-           "Source: All subscribed groups in the local Gnus Agent\n\n"
+           (format
+            "Source: %s\n\n"
+            (or description
+                "All subscribed groups in the local Gnus Agent"))
            (format "Threads: %d\n" thread-count)
            (format "Articles: %d\n" article-count)))
          (sections
@@ -4366,6 +4424,9 @@ buffer hidden by default, select the current Summary row, and run
 ;;;###autoload
 (defun bs-gnus-prepare-today-context ()
   "Prepare today's local articles from a Gnus Group or Summary buffer.
+In a Group buffer, use the group at point or every group below the
+topic at point; the root topic includes the complete topic tree.  In
+a Summary buffer, use only the current group.
 Group articles by thread and order each thread chronologically.
 Read only Agent overview and body data without contacting any news
 server."
@@ -4376,13 +4437,20 @@ server."
   (unless gnus-agent
     (user-error "Gnus Agent is not enabled"))
   (let* ((source (current-buffer))
-         (records (bs-gnus--today-records)))
-    (unless records
-      (user-error "No locally indexed Gnus articles from today"))
-    (bs-gnus--build-today-context source records)
-    (run-hooks 'bs-gnus-summary-thread-context-hook)
-    (message "Prepared %d Gnus articles from today in %s"
-             (length records) bs-gnus-context-buffer-name)))
+         (scope (bs-gnus--today-context-scope))
+         (description (car scope))
+         (groups (cdr scope)))
+    (unless groups
+      (user-error "No Gnus groups belong to %s" description))
+    (let ((records (bs-gnus--today-records groups)))
+      (unless records
+        (user-error "No locally indexed Gnus articles from today in %s"
+                    description))
+      (bs-gnus--build-today-context source records description)
+      (run-hooks 'bs-gnus-summary-thread-context-hook)
+      (message "Prepared %d Gnus articles from today in %s (%s)"
+               (length records) bs-gnus-context-buffer-name
+               description))))
 
 (defun bs-gnus--summary-install ()
   "Install the custom Gnus Summary renderer."
