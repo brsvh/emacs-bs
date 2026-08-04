@@ -84,9 +84,12 @@
   :type 'string
   :group 'bs-elfeed)
 
-(defcustom bs-elfeed-context-fetch-threshold 200
-  "Minimum feed text length that avoids fetching the entry link."
-  :type 'natnum
+(defcustom bs-elfeed-context-fetch-threshold nil
+  "Minimum feed text length that avoids fetching the entry link.
+When nil, always fetch HTTP(S) entry links and retain the feed text as
+a fallback."
+  :type '(choice (const :tag "Always fetch linked pages" nil)
+                 natnum)
   :group 'bs-elfeed)
 
 (defcustom bs-elfeed-context-fetch-timeout 15
@@ -654,8 +657,8 @@ outline level."
       (set-buffer-modified-p nil)
       (current-buffer))))
 
-(defun bs-elfeed--select-entry-line (entry)
-  "Select the Search line displaying ENTRY."
+(defun bs-elfeed--goto-entry-line (entry)
+  "Move point to the Search line displaying ENTRY."
   (let ((origin (point))
         found)
     (goto-char (point-min))
@@ -669,8 +672,7 @@ outline level."
       (goto-char origin)
       (when (eobp)
         (forward-line -1)))
-    (goto-char (line-beginning-position))
-    (push-mark (line-end-position) nil t)))
+    (goto-char (line-beginning-position))))
 
 (defun bs-elfeed--finish-request (request)
   "Finish REQUEST and run the context hook."
@@ -682,8 +684,9 @@ outline level."
          "Prepared %d Elfeed entries, but the Search buffer closed"
          count)
       (pop-to-buffer source)
-      (bs-elfeed--select-entry-line
+      (bs-elfeed--goto-entry-line
        (car (bs-elfeed--request-entries request)))
+      (deactivate-mark)
       (message "Prepared %d Elfeed entries in %s"
                count bs-elfeed-context-buffer-name)
       (run-hooks 'bs-elfeed-search-context-hook))))
@@ -779,8 +782,9 @@ outline level."
   "Prepare ENTRY as part of REQUEST."
   (let ((fallback (or (bs-elfeed--entry-text entry) ""))
         (url (elfeed-entry-link entry)))
-    (if (or (>= (length fallback)
-                bs-elfeed-context-fetch-threshold)
+    (if (or (and (numberp bs-elfeed-context-fetch-threshold)
+                 (>= (length fallback)
+                     bs-elfeed-context-fetch-threshold))
             (not (and url
                       (string-match-p "\\`https?://" url))))
         (bs-elfeed--complete-entry request entry fallback)
@@ -791,7 +795,7 @@ outline level."
   "Prepare selected Elfeed entries as context.
 Native marks take precedence over the active region and entry at
 point, following `elfeed-search-selected'.  Fetch linked articles
-asynchronously when their feed content is too short."
+asynchronously by default and retain feed content as a fallback."
   (interactive nil elfeed-search-mode)
   (let ((entries (elfeed-search-selected)))
     (unless entries
