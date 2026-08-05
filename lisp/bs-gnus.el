@@ -1886,6 +1886,16 @@ requested header numbers.  Return the numbers actually available."
   (cons (plist-get record :group)
         (plist-get record :article)))
 
+(defun bs-gnus--notifications-body (record)
+  "Return a distinguishable desktop notification body for RECORD."
+  (format "%s\n%s · #%d · %s"
+          (plist-get record :subject)
+          (plist-get record :group)
+          (plist-get record :article)
+          (format-time-string
+           "%Y-%m-%d %H:%M"
+           (seconds-to-time (plist-get record :timestamp)))))
+
 (defun bs-gnus--notifications-deliver (record)
   "Deliver unread article RECORD if it remains eligible."
   (when bs-gnus--notifications-enabled
@@ -1902,7 +1912,7 @@ requested header numbers.  Return the numbers actually available."
         (when-let* ((id
                      (gnus-notifications-notify
                       (plist-get record :sender)
-                      (plist-get record :subject)
+                      (bs-gnus--notifications-body record)
                       (and-let* ((file
                                   (plist-get record :photo-file)))
                         (and (file-readable-p file) file)))))
@@ -1925,12 +1935,18 @@ requested header numbers.  Return the numbers actually available."
     (function id key group article)
   "Call FUNCTION with ID and KEY, then focus ARTICLE from GROUP."
   (funcall function id key)
-  (when (and (derived-mode-p 'gnus-summary-mode)
-             (equal gnus-newsgroup-name group))
-    (gnus-summary-goto-article article nil t)
-    (when-let* ((window
-                 (get-buffer-window gnus-article-buffer)))
-      (select-window window))))
+  (when-let* ((summary-window
+               (seq-find
+                (lambda (window)
+                  (with-current-buffer (window-buffer window)
+                    (and (derived-mode-p 'gnus-summary-mode)
+                         (equal gnus-newsgroup-name group))))
+                (window-list (selected-frame) 'no-minibuffer))))
+    (select-window summary-window)
+    (when (gnus-summary-goto-article article nil t)
+      (when-let* ((article-window
+                   (get-buffer-window gnus-article-buffer)))
+        (select-window article-window)))))
 
 (defun bs-gnus--notifications-action-with-display-function
     (function id key)
