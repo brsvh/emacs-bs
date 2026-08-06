@@ -519,6 +519,14 @@ from the alist use the label `Usenet'."
   :type 'natnum
   :group 'bs-gnus)
 
+(defcustom bs-gnus-update-download-bodies t
+  "Whether background updates download unread article bodies.
+When nil, updates still retrieve overview data needed for group state
+and notifications.  Article bodies remain available on demand through
+the configured Gnus method."
+  :type 'boolean
+  :group 'bs-gnus)
+
 (defcustom bs-gnus-update-retry-delays '(300 900 1800)
   "Seconds to wait after consecutive background update failures.
 After exhausting the list, continue using its final delay."
@@ -540,6 +548,13 @@ After exhausting the list, continue using its final delay."
   (* 90 24 60 60)
   "Seconds before a cached notification avatar expires."
   :type 'natnum
+  :group 'bs-gnus)
+
+(defcustom bs-gnus-notifications-include-existing-unread t
+  "Whether background updates notify existing unread articles.
+When nil, notify only unread articles first discovered by the current
+background update."
+  :type 'boolean
   :group 'bs-gnus)
 
 (defcustom bs-gnus-notifications-read-display-function
@@ -898,13 +913,15 @@ standard behaviors."
                         (bs-gnus--update-worker-article-range
                          new-low (or (cdr active) -1)))
                        (body-articles
-                        (sort
-                         (delete-dups
-                          (append
-                           (copy-sequence
-                            (plist-get spec :missing-bodies))
-                           (copy-sequence new-articles)))
-                         #'<))
+                        (and
+                         (plist-get spec :download-bodies)
+                         (sort
+                          (delete-dups
+                           (append
+                            (copy-sequence
+                             (plist-get spec :missing-bodies))
+                            (copy-sequence new-articles)))
+                          #'<)))
                        (body-articles
                         (bs-gnus--update-worker-filter-active
                          body-articles active))
@@ -1326,11 +1343,15 @@ pair containing the fetched body numbers and any errors."
                                    (or (gnus-active group)
                                        '(0 . 0)))
                           :read (copy-tree (gnus-info-read info))
+                          :download-bodies
+                          bs-gnus-update-download-bodies
                           :missing-bodies
-                          (bs-gnus--update-missing-bodies group)
+                          (and bs-gnus-update-download-bodies
+                               (bs-gnus--update-missing-bodies group))
                           :notify notify
                           :notification-articles
                           (and notify
+                               bs-gnus-notifications-include-existing-unread
                                (bs-gnus--notifications-candidates
                                 group)))))
               (if entry
