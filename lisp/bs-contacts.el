@@ -540,18 +540,37 @@ default writable target."
            "--parsable"
            "--fields" "uid,formatted_name,address_book"))))
 
+(defun bs-contacts--khard-uid-query (addressbook-id uid)
+  "Return a unique khard UID query for UID in ADDRESSBOOK-ID.
+Reject missing contacts, substring collisions and unexpected address books."
+  (unless (and (stringp uid) (not (string-empty-p uid)))
+    (user-error "Contact UID must be a non-empty string"))
+  (let* ((name (bs-contacts--khard-addressbook-name addressbook-id))
+         (query (concat "uid:" uid))
+         (output (bs-contacts--call-khard
+                  "list" addressbook-id
+                  (list "--addressbook" name "--parsable"
+                        "--fields" "uid,address_book" "--" query)))
+         (lines (split-string (string-trim-right output) "\n" t)))
+    (unless (equal lines (list (concat uid "\t" name)))
+      (user-error "Contact UID is missing or ambiguous in %s: %s"
+                  addressbook-id uid))
+    query))
+
 (defun bs-contacts--khard-show (addressbook-id uid &optional format)
   "Return khard output for UID in ADDRESSBOOK-ID.
 
 FORMAT defaults to `pretty' and may also be `yaml' or `vcard'."
   (let ((addressbook-name
-         (bs-contacts--khard-addressbook-name addressbook-id)))
+         (bs-contacts--khard-addressbook-name addressbook-id))
+        (query (bs-contacts--khard-uid-query addressbook-id uid)))
     (bs-contacts--call-khard
      "show"
      addressbook-id
      (list "--addressbook" addressbook-name
            "--format" (symbol-name (or format 'pretty))
-           uid))))
+           "--" query)
+     "q\n")))
 
 (defun bs-contacts--khard-template ()
   "Return a new-contact YAML template from khard."
@@ -574,15 +593,16 @@ Return khard's standard output after a successful creation."
 
 Return khard's standard output after a successful edit."
   (let ((addressbook-name
-         (bs-contacts--khard-addressbook-name addressbook-id t)))
+         (bs-contacts--khard-addressbook-name addressbook-id t))
+        (query (bs-contacts--khard-uid-query addressbook-id uid)))
     (bs-contacts--call-khard
      "edit"
      addressbook-id
      (list "--addressbook" addressbook-name
            "--format" "yaml"
            "--input-file" input-file
-           uid)
-     "yes\n")))
+           "--" query)
+     "yes\nq\n")))
 
 (defun bs-contacts--khard-remove (addressbook-id uid)
   "Remove UID from ADDRESSBOOK-ID without khard's second prompt.
@@ -590,11 +610,13 @@ Return khard's standard output after a successful edit."
 The caller must obtain user confirmation before invoking this
 function.  Return khard's standard output after successful removal."
   (let ((addressbook-name
-         (bs-contacts--khard-addressbook-name addressbook-id t)))
+         (bs-contacts--khard-addressbook-name addressbook-id t))
+        (query (bs-contacts--khard-uid-query addressbook-id uid)))
     (bs-contacts--call-khard
      "remove"
      addressbook-id
-     (list "--addressbook" addressbook-name "--force" uid))))
+     (list "--addressbook" addressbook-name "--force" "--" query)
+     "q\n")))
 
 (defun bs-contacts--unfold-vcard (vcard)
   "Return VCARD with line endings normalized and folded lines joined."
@@ -1087,6 +1109,8 @@ book, and UID.  A successful deletion invalidates the derived cache
 but does not run vdirsyncer or delete anything remotely.  Return
 non-nil only after a successful deletion."
   (interactive)
+  (when (bs-contacts--sync-running-p)
+    (user-error "Cannot delete contacts while synchronization is running"))
   (let* ((selected-contact
           (or contact
               (bs-contacts--select-contact
@@ -1102,6 +1126,8 @@ non-nil only after a successful deletion."
         (progn
           (message "Contact deletion canceled")
           nil)
+      (when (bs-contacts--sync-running-p)
+        (user-error "Cannot delete contacts while synchronization is running"))
       (let ((output
              (bs-contacts--khard-remove addressbook-id uid)))
         (bs-contacts--invalidate-cache)
