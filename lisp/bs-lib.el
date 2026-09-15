@@ -48,7 +48,7 @@
   (let ((path (apply #'bs-path segments)) directory)
     (if (file-directory-p path)
         (setq directory path)
-      (setq directory (file-name-directory path)))
+      (setq directory (or (file-name-directory path) default-directory)))
     (make-directory directory 'parents)
     path))
 
