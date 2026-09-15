@@ -151,13 +151,13 @@ in
             ;
 
           mkInstall = stage: ''
-            if gitDir="$(
+            if hooksDir="$(
               ${getExe git} -C "$PRJ_ROOT" \
-                rev-parse --absolute-git-dir \
+                rev-parse --path-format=absolute --git-path hooks \
                 2>/dev/null
             )"; then
-              mkdir -p "$gitDir/hooks"
-              ln -sf "${mkScript stage}" "$gitDir/hooks/${stage}"
+              mkdir -p "$hooksDir"
+              ln -sf "${mkScript stage}" "$hooksDir/${stage}"
             fi
           '';
 
@@ -169,8 +169,12 @@ in
                 exit 0
               fi
 
+              projectRoot="$(
+                ${getExe git} rev-parse --show-toplevel
+              )" || exit 1
+
               gitDir="$(
-                ${getExe git} -C "$PRJ_ROOT" \
+                ${getExe git} -C "$projectRoot" \
                   rev-parse --absolute-git-dir \
                   2>/dev/null || true
               )"
@@ -183,7 +187,7 @@ in
                 fi
               fi
 
-              exec ${getExe prek} -C "$PRJ_ROOT" run --stage "${stage}" "$@"
+              exec ${getExe prek} -C "$projectRoot" run --stage "${stage}" "$@"
             '';
         in
         concatStringsSep "\n" (
