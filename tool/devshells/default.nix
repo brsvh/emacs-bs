@@ -64,6 +64,7 @@ in
         };
 
         "*.nix" = {
+          indent_size = 2;
           indent_style = "space";
           max_line_length = 80;
           tab_width = 2;
