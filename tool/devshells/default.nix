@@ -1,6 +1,7 @@
 {
   lib,
   pkgs,
+  projectRoot,
   ...
 }:
 let
@@ -34,8 +35,17 @@ let
     ]
   );
 
+  elfmt =
+    pkgs.callPackage
+      (projectRoot + /tool/elfmt/package.nix)
+      {
+        inherit
+          projectRoot
+          ;
+      };
+
   formatters = with pkgs; [
-    elisp-format
+    elfmt
     mdformatWithPlugins
     nixfmt
   ];
@@ -207,7 +217,7 @@ in
       data = {
         formatter = {
           emacs-lisp = {
-            command = "elisp-format";
+            command = "elfmt";
 
             includes = [
               "*.el"

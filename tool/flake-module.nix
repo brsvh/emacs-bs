@@ -1,11 +1,11 @@
 {
   inputs,
+  projectRoot,
   ...
 }:
 let
   inherit (inputs)
     infix
-    nixpkgs
     ;
 in
 {
@@ -17,41 +17,25 @@ in
     {
       config,
       lib,
-      pkgs',
-      system,
+      pkgs,
       ...
     }:
     {
-      _module = {
-        args = {
-          pkgs' = import nixpkgs {
-            inherit
-              system
-              ;
-
-            overlays = [
-              infix.overlays.default
-            ];
-          };
-        };
-      };
-
       devshells = {
         default = import ./devshells/default.nix {
           inherit
             lib
+            pkgs
+            projectRoot
             ;
-
-          pkgs = pkgs';
         };
       };
 
       formatter = import ./formatter.nix {
         inherit
           lib
+          pkgs
           ;
-
-        pkgs = pkgs';
 
         treefmtConfig =
           config.devshells.default.files.treefmt;
