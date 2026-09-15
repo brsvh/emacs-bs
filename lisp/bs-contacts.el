@@ -280,6 +280,12 @@ must be a non-empty string."
 (defvar bs-contacts--cache-generation 0
   "Generation of the contact cache, advanced on invalidation and reload.")
 
+(defvar bs-contacts--mail-cache-key nil
+  "Contact snapshot, history snapshot and filters for mail completion.")
+
+(defvar bs-contacts--mail-cache nil
+  "Merged mail completion table for `bs-contacts--mail-cache-key'.")
+
 (defvar bs-contacts--watch-descriptors nil
   "File notification descriptors for configured address books.")
 
@@ -1223,7 +1229,7 @@ alone."
       (cond
        ((not (and (stringp email) (not (string-empty-p email))))
         address)
-       (name (format "%s <%s>" name email))
+       (name (mail-header-make-address name email))
        (t email))))))
 
 (defun bs-contacts--email-compact-local-part (email)
@@ -1291,26 +1297,13 @@ when ADDRESS is not ignored."
           (bs-contacts-contact-name contact))))
     (mapcar
      (lambda (email)
-       (let* ((display
-               (if name
-                   (format "%s <%s>" name email)
-                 email))
-              (clean-display
-               (bs-contacts--clean-mail-address display)))
+       (let ((display (if name (mail-header-make-address name email) email)))
          (bs-contacts-mail-candidate-create
           :email email
-          :display clean-display
+          :display display
           :source 'khard
           :contact contact)))
      (bs-contacts-contact-emails contact))))
-
-(defun bs-contacts--khard-mail-candidates ()
-  "Return mail candidates from all enabled khard contacts.
-
-Each contact email produces a distinct candidate.  Contacts without
-email addresses produce none."
-  (mapcan #'bs-contacts--contact-mail-candidates
-          (bs-contacts--contacts)))
 
 (defun bs-contacts--normalized-email (address)
   "Return the normalized email identity parsed from ADDRESS, or nil."
@@ -1340,6 +1333,37 @@ email addresses produce none."
        contacts-set))
     (nreverse candidates)))
 
+(defun bs-contacts--same-mail-history-p (history snapshot)
+  "Return non-nil when HISTORY and SNAPSHOT contain the same address keys."
+  (or (eq history snapshot)
+      (and (hash-table-p history)
+           (hash-table-p snapshot)
+           (= (hash-table-count history) (hash-table-count snapshot))
+           (let ((missing (make-symbol "missing")))
+             (cl-loop for key being the hash-keys of history
+                      always (not (eq (gethash key snapshot missing) missing)))))))
+
+(defun bs-contacts--mail-completion-set (mu4e-contacts-set contacts)
+  "Merge MU4E-CONTACTS-SET and CONTACTS into a cached completion table."
+  (let ((filters (list bs-contacts-ignored-local-part-regexp
+                       bs-contacts-ignored-display-name-regexp
+                       bs-contacts-ignored-email-regexps)))
+    (unless (and bs-contacts--mail-cache-key
+                 (equal contacts (car bs-contacts--mail-cache-key))
+                 (equal filters (nth 2 bs-contacts--mail-cache-key))
+                 (bs-contacts--same-mail-history-p
+                  mu4e-contacts-set (cadr bs-contacts--mail-cache-key)))
+      (setq bs-contacts--mail-cache
+            (bs-contacts--build-mail-completion-set mu4e-contacts-set contacts)
+            bs-contacts--mail-cache-key
+            (list (copy-tree contacts t)
+                  (when (hash-table-p mu4e-contacts-set)
+                    (copy-hash-table mu4e-contacts-set))
+                  (list (copy-sequence bs-contacts-ignored-local-part-regexp)
+                        (copy-sequence bs-contacts-ignored-display-name-regexp)
+                        (mapcar #'copy-sequence bs-contacts-ignored-email-regexps)))))
+    bs-contacts--mail-cache))
+
 (defun bs-contacts-mail-completion-set (&optional mu4e-contacts-set)
   "Return merged khard and MU4E-CONTACTS-SET mail completions.
 
@@ -1347,7 +1371,12 @@ The return value is a hash table compatible with
 `mu4e--contacts-set'.  Candidates are deduplicated by normalized email
 address.  Khard is authoritative: when both sources contain the same
 email, its cleaned display name replaces the mu4e history name.
-Automated-sender filters apply to both sources."
+Automated-sender filters apply to both sources.  Reuse the merged table
+while the contact records, history contents and filters are unchanged."
+  (bs-contacts--mail-completion-set mu4e-contacts-set (bs-contacts--contacts)))
+
+(defun bs-contacts--build-mail-completion-set (mu4e-contacts-set contacts)
+  "Build merged completions from MU4E-CONTACTS-SET and CONTACTS."
   (let ((by-email (make-hash-table :test #'equal))
         (completion-set (make-hash-table :test #'equal)))
     (dolist (candidate
@@ -1355,7 +1384,7 @@ Automated-sender filters apply to both sources."
       (puthash (bs-contacts-mail-candidate-email candidate)
                candidate
                by-email))
-    (dolist (candidate (bs-contacts--khard-mail-candidates))
+    (dolist (candidate (mapcan #'bs-contacts--contact-mail-candidates contacts))
       (when-let* ((display
                    (bs-contacts--completion-candidate
                     (bs-contacts-mail-candidate-display candidate)))
@@ -1377,16 +1406,7 @@ Automated-sender filters apply to both sources."
   "Return a cleaned copy of `mu4e--contacts-set'."
   (when (and (boundp 'mu4e--contacts-set)
              (hash-table-p mu4e--contacts-set))
-    (let ((contacts (make-hash-table
-                     :test 'equal
-                     :size (hash-table-count mu4e--contacts-set))))
-      (maphash
-       (lambda (candidate _value)
-         (when-let* ((candidate
-                      (bs-contacts--completion-candidate candidate)))
-           (puthash candidate t contacts)))
-       mu4e--contacts-set)
-      contacts)))
+    (bs-contacts--mail-completion-set mu4e--contacts-set nil)))
 
 (defun bs-contacts--mu4e-completion-set ()
   "Return khard and mu4e contacts merged for mail completion.
@@ -1405,10 +1425,12 @@ return cleaned mu4e history candidates instead."
   "Call Mu4e completion FUNCTION with STR, PRED, and ACTION.
 
 Use cleaned contact candidates for the duration of the call."
-  (let ((mu4e--contacts-set
-         (or (bs-contacts--mu4e-completion-set)
-             mu4e--contacts-set)))
-    (funcall function str pred action)))
+  (if (eq action 'metadata)
+      (funcall function str pred action)
+    (let ((mu4e--contacts-set
+           (or (bs-contacts--mu4e-completion-set)
+               mu4e--contacts-set)))
+      (funcall function str pred action))))
 
 ;;;###autoload
 (defun bs-contacts-mu4e-completion-enable ()
