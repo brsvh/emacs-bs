@@ -31,8 +31,10 @@
 ;;; Code:
 
 (require 'bs-ext)
+(require 'cl-lib)
 (require 'khalel)
 (require 'org-capture)
+(require 'subr-x)
 
 (declare-function calfw-refresh-calendar-buffer "calfw" (&optional no-resize))
 (declare-function org-agenda-redo "org-agenda" (&optional all))
@@ -92,10 +94,71 @@ file changed or the local date advanced."
   "Return the Emacs executable used for background imports."
   (expand-file-name invocation-name invocation-directory))
 
+(defun bs-khal--worker-import ()
+  "Import into a temporary file and publish only after khal succeeds.
+This function runs in the background Emacs process.  Signal an error
+when khal fails, even if Khalel would only print a warning."
+  (let* ((target (file-truename (expand-file-name khalel-import-org-file)))
+         (temporary-file
+          (make-temp-file
+           (expand-file-name ".bs-khal-" (file-name-directory target))
+           nil ".org"))
+         (program (or khalel-khal-command (executable-find "khal")))
+         (original-call-process (symbol-function 'call-process))
+         checked
+         error-files)
+    (unwind-protect
+        (progn
+          (let ((khalel-import-org-file temporary-file)
+                (khalel-import-org-file-confirm-overwrite nil)
+                (current-prefix-arg nil)
+                (make-backup-files nil))
+            (cl-letf
+             (((symbol-function 'call-process)
+               (lambda (command infile destination display &rest arguments)
+                 (let ((stderr-file (and (listp destination)
+                                         (cadr destination)))
+                       status)
+                   (when (and (equal command program)
+                              (stringp stderr-file))
+                     (push stderr-file error-files))
+                   ;; Khalel can pass the configuration option as a pair.
+                   (setq status
+                         (apply original-call-process command infile
+                                destination display
+                                (if (equal command program)
+                                    (flatten-tree arguments)
+                                  arguments)))
+                   (when (equal command program)
+                     (setq checked t)
+                     (unless (and (integerp status) (zerop status))
+                       (error "Khal import failed (status %s): %s"
+                              status
+                              (if (and (stringp stderr-file)
+                                       (file-readable-p stderr-file))
+                                  (with-temp-buffer
+                                    (insert-file-contents stderr-file)
+                                    (string-trim (buffer-string)))
+                                "no diagnostic output"))))
+                   status))))
+             (khalel-import-events)))
+          (unless checked
+            (error "Khalel did not run the configured khal command"))
+          (when-let* ((modes (file-modes target)))
+            (set-file-modes temporary-file modes))
+          (rename-file temporary-file target t))
+      (when-let* ((buffer (find-buffer-visiting temporary-file)))
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (dolist (file (cons temporary-file error-files))
+        (when (file-exists-p file)
+          (delete-file file))))))
+
 (defun bs-khal--worker-form ()
   "Return the form evaluated by the background Emacs process."
   `(progn
-     (require 'khalel)
+     (require 'bs-khal)
      (setq khalel-import-end-date ,khalel-import-end-date
            khalel-import-format ,khalel-import-format
            khalel-import-org-file ,khalel-import-org-file
@@ -106,17 +169,21 @@ file changed or the local date advanced."
            khalel-import-start-date ,khalel-import-start-date
            khalel-khal-command ,khalel-khal-command
            khalel-khal-config ,khalel-khal-config)
-     (khalel-import-events)))
+     (bs-khal--worker-import)))
 
 (defun bs-khal--worker-command ()
   "Return the command used for the background import process."
   (let ((library (or (locate-library "khalel")
-                     (error "Cannot locate the Khalel library"))))
+                     (error "Cannot locate the Khalel library")))
+        (worker-library (or (locate-library "bs-khal")
+                            (error "Cannot locate the calendar worker"))))
     (list (bs-khal--emacs-program)
           "--batch"
           "--no-init-file"
           "--directory"
           (file-name-directory library)
+          "--directory"
+          (file-name-directory worker-library)
           "--eval"
           (prin1-to-string (bs-khal--worker-form)))))
 
@@ -134,8 +201,12 @@ file changed or the local date advanced."
      'sha256
      (prin1-to-string
       (list
-       1
+       2
        (format-time-string "%Y-%m-%d")
+       (list khalel-import-start-date khalel-import-end-date
+             khalel-import-format khalel-import-org-file
+             khalel-import-org-file-header khalel-import-org-file-read-only
+             khalel-khal-command khalel-khal-config)
        (delq
         nil
         (mapcar
@@ -194,7 +265,8 @@ file changed or the local date advanced."
             (setq bs-khal--last-import-state source-state)
             (with-demoted-errors "Could not persist calendar state: %S"
               (bs-khal--write-import-state source-state))
-            (bs-khal--refresh-buffers)
+            (with-demoted-errors "Could not refresh calendar buffers: %S"
+              (bs-khal--refresh-buffers))
             (when (buffer-live-p buffer)
               (kill-buffer buffer))
             (message "Calendar import finished")
@@ -204,7 +276,9 @@ file changed or the local date advanced."
          'bs-khal
          (format "Calendar import failed with status %d; see %s"
                  (process-exit-status process)
-                 (buffer-name buffer))
+                 (if (buffer-live-p buffer)
+                     (buffer-name buffer)
+                   bs-khal-import-buffer-name))
          :error)))))
 
 ;;;###autoload
@@ -238,8 +312,10 @@ that changes which arrive during the current run are not lost."
   "Import calendar events when their source state changed."
   (when bs-khal-calendar-directories
     (let ((source-state (bs-khal--source-state)))
-      (when (or (not (file-readable-p khalel-import-org-file))
-                (not (equal source-state bs-khal--last-import-state)))
+      (when (if (process-live-p bs-khal--import-process)
+                (not (equal source-state bs-khal--import-source-state))
+              (or (not (file-readable-p khalel-import-org-file))
+                  (not (equal source-state bs-khal--last-import-state))))
         (bs-khal-import-events)))))
 
 (defun bs-khal--setup-import-check-timer ()
@@ -293,6 +369,9 @@ Return SUCCESS unchanged for the advised Khalel function."
 ;;;###autoload
 (defun bs-khal-setup ()
   "Configure Khalel to refresh calendars through background imports."
+  (setq khalel-import-events-after-capture nil
+        khalel-import-events-after-vdirsyncer nil
+        khalel-import-events-after-khal-edit nil)
   (when bs-khal-default-calendar
     (setq khalel-default-calendar bs-khal-default-calendar))
   (khalel-add-capture-template)
