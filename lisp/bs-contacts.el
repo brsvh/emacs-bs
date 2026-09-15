@@ -277,6 +277,9 @@ must be a non-empty string."
 (defvar bs-contacts--cache-last-check nil
   "Time of the last fallback local vCard state check.")
 
+(defvar bs-contacts--cache-generation 0
+  "Generation of the contact cache, advanced on invalidation and reload.")
+
 (defvar bs-contacts--watch-descriptors nil
   "File notification descriptors for configured address books.")
 
@@ -342,7 +345,8 @@ must be a non-empty string."
 EVENT is ignored and permits this function to be used as a file
 notification callback."
   (setq bs-contacts--cache-valid-p nil
-        bs-contacts--cache-last-check nil))
+        bs-contacts--cache-last-check nil)
+  (cl-incf bs-contacts--cache-generation))
 
 (defun bs-contacts--remove-watches ()
   "Remove all contact address book file watches."
@@ -356,6 +360,7 @@ notification callback."
   (let ((paths (bs-contacts--addressbook-paths)))
     (unless (equal paths bs-contacts--watched-paths)
       (bs-contacts--remove-watches)
+      (bs-contacts--invalidate-cache)
       (setq bs-contacts--watched-paths paths)
       (when (and (require 'filenotify nil t)
                  (fboundp 'file-notify-add-watch))
@@ -386,21 +391,27 @@ notification callback."
       (setq bs-contacts--cache-last-check (current-time))
       (when (and bs-contacts--cache-valid-p
                  (not (equal state bs-contacts--cache-file-state)))
-        (setq bs-contacts--cache-valid-p nil)))))
+        (bs-contacts--invalidate-cache))
+      state)))
 
 (defun bs-contacts--contacts ()
   "Return contacts, loading them lazily when the cache is stale."
   (bs-contacts--ensure-watches)
-  (bs-contacts--check-local-file-state)
-  (if bs-contacts--cache-valid-p
-      bs-contacts--cache
-    (let ((contacts (bs-contacts--read-contacts))
-          (state (bs-contacts--local-file-state)))
-      (setq bs-contacts--cache contacts
-            bs-contacts--cache-file-state state
-            bs-contacts--cache-last-check (current-time)
-            bs-contacts--cache-valid-p t)
-      contacts)))
+  (let ((state (bs-contacts--check-local-file-state)))
+    (if bs-contacts--cache-valid-p
+        bs-contacts--cache
+      (let* ((before (or state (bs-contacts--local-file-state)))
+             (generation bs-contacts--cache-generation)
+             (contacts (bs-contacts--read-contacts))
+             (after (bs-contacts--local-file-state)))
+        (setq bs-contacts--cache contacts
+              bs-contacts--cache-file-state before
+              bs-contacts--cache-last-check (current-time)
+              bs-contacts--cache-valid-p
+              (and (= generation bs-contacts--cache-generation)
+                   (equal before after)))
+        (cl-incf bs-contacts--cache-generation)
+        contacts))))
 
 ;;;###autoload
 (defun bs-contacts-refresh ()
@@ -639,29 +650,59 @@ function.  Return khard's standard output after successful removal."
    t
    t))
 
-(defun bs-contacts--vcard-emails (vcard)
-  "Return all email addresses from machine-readable VCARD."
+(defun bs-contacts--vcard-values (vcard property)
+  "Return decoded PROPERTY values from machine-readable VCARD."
   (let ((case-fold-search t)
-        emails)
+        values)
     (dolist (line (split-string (bs-contacts--unfold-vcard vcard) "\n" t))
       (when (string-match
-             "\\`\\(?:[^.;:]+\\.\\)?EMAIL\\(?:;[^:]*\\)?:\\(.*\\)\\'"
+             (concat "\\`\\(?:[^.;:]+\\.\\)?" (regexp-quote property)
+                     "\\(?:;[^:]*\\)?:\\(.*\\)\\'")
              line)
-        (let ((email
-               (string-trim
-                (bs-contacts--unescape-vcard-value
-                 (match-string 1 line)))))
-          (setq email (replace-regexp-in-string
-                       "\\`mailto:" "" email t t))
-          (unless (string-empty-p email)
-            (push email emails)))))
-    (delete-dups (nreverse emails))))
+        (push (bs-contacts--unescape-vcard-value (match-string 1 line))
+              values)))
+    (nreverse values)))
 
-(defun bs-contacts--parse-list-line (line addressbook-id addressbook-name)
+(defun bs-contacts--vcard-emails (vcard)
+  "Return all email addresses from machine-readable VCARD."
+  (delete-dups
+   (delq nil
+         (mapcar
+          (lambda (value)
+            (let ((email (replace-regexp-in-string
+                          "\\`[mM][aA][iI][lL][tT][oO]:" ""
+                          (string-trim value) t t)))
+              (unless (string-empty-p email) email)))
+          (bs-contacts--vcard-values vcard "EMAIL")))))
+
+(defun bs-contacts--addressbook-emails (addressbook-id)
+  "Return a UID-to-emails table from ADDRESSBOOK-ID's local vCards.
+Ask khard for all filenames once, then read those files directly."
+  (let ((output (bs-contacts--call-khard
+                 "filename" addressbook-id
+                 (list "--addressbook"
+                       (bs-contacts--khard-addressbook-name addressbook-id))))
+        (emails (make-hash-table :test #'equal)))
+    (dolist (file (split-string (string-trim-right output) "\n" t))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (let* ((vcard (buffer-string))
+               (uids (bs-contacts--vcard-values vcard "UID"))
+               (uid (car uids)))
+          (unless (and (= (length uids) 1) (not (string-empty-p uid)))
+            (error "Expected one non-empty contact UID in %s" file))
+          (unless (eq (gethash uid emails 'missing) 'missing)
+            (error "Duplicate contact UID in %s: %s" addressbook-id uid))
+          (puthash uid (bs-contacts--vcard-emails vcard) emails))))
+    emails))
+
+(defun bs-contacts--parse-list-line
+    (line addressbook-id addressbook-name emails-by-uid)
   "Return the contact represented by parsable khard LINE.
 
 ADDRESSBOOK-ID is the configured stable ID and ADDRESSBOOK-NAME is
-khard's expected name for the selected address book."
+khard's expected name for the selected address book.  EMAILS-BY-UID
+contains email lists read in bulk from that address book's vCards."
   (let ((fields (split-string line "\t" nil)))
     (unless (= (length fields) 3)
       (error "Malformed khard list output for %s: %S"
@@ -670,12 +711,10 @@ khard's expected name for the selected address book."
       (unless (equal reported-addressbook addressbook-name)
         (error "Unexpected khard address book for %s: %S"
                addressbook-id reported-addressbook))
-      (bs-contacts--make-contact
-       uid
-       addressbook-id
-       name
-       (bs-contacts--vcard-emails
-        (bs-contacts--khard-show addressbook-id uid 'vcard))))))
+      (let ((emails (gethash uid emails-by-uid 'missing)))
+        (when (eq emails 'missing)
+          (error "Contact changed while reading %s: %s" addressbook-id uid))
+        (bs-contacts--make-contact uid addressbook-id name emails)))))
 
 (defun bs-contacts--read-addressbook (addressbook-id)
   "Read and return all contacts from ADDRESSBOOK-ID through khard."
@@ -684,11 +723,12 @@ khard's expected name for the selected address book."
          (output (bs-contacts--khard-list addressbook-id)))
     (if (string-empty-p (string-trim output))
         nil
-      (mapcar
-       (lambda (line)
-         (bs-contacts--parse-list-line
-          line addressbook-id addressbook-name))
-       (split-string (string-trim-right output) "\n" t)))))
+      (let ((emails (bs-contacts--addressbook-emails addressbook-id)))
+        (mapcar
+         (lambda (line)
+           (bs-contacts--parse-list-line
+            line addressbook-id addressbook-name emails))
+         (split-string (string-trim-right output) "\n" t))))))
 
 (defun bs-contacts--read-contacts ()
   "Read contacts from every configured local address book through khard."
