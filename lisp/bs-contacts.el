@@ -47,6 +47,14 @@ with an argument list and never through a shell."
   :type 'string
   :group 'bs-contacts)
 
+(defcustom bs-contacts-khard-timeout 30
+  "Maximum seconds to wait for a noninteractive khard command."
+  :type 'number
+  :group 'bs-contacts)
+
+(defconst bs-contacts--process-output-limit (* 16 1024 1024)
+  "Maximum bytes retained from each khard output stream.")
+
 (defcustom bs-contacts-vdirsyncer-command "vdirsyncer"
   "Program used to synchronize local vCard address books.
 
@@ -418,6 +426,20 @@ does not modify vCard files or run synchronization."
                 "\n"))))
     (if (string-empty-p text) "no diagnostic output" text)))
 
+(defun bs-contacts--process-filter (process output)
+  "Append OUTPUT from PROCESS, terminating commands with excessive output."
+  (let ((owner (or (process-get process 'bs-contacts-owner) process)))
+    (when (buffer-live-p (process-buffer process))
+      (with-current-buffer (process-buffer process)
+        (if (> (+ (1- (position-bytes (point-max))) (string-bytes output))
+               bs-contacts--process-output-limit)
+            (progn
+              (process-put owner 'bs-contacts-output-overflow t)
+              (when (process-live-p owner)
+                (delete-process owner)))
+          (goto-char (point-max))
+          (insert output))))))
+
 (defun bs-contacts--call-khard
     (operation addressbook-id arguments &optional input)
   "Run khard OPERATION with ARGUMENTS and return standard output.
@@ -427,9 +449,14 @@ When INPUT is non-nil, send it to khard's standard input before
 closing the stream.
 Signal `user-error' if khard cannot be started or exits unsuccessfully.
 Standard output and standard error are captured separately.  Every
-element of ARGUMENTS is passed as a distinct process argument."
+element of ARGUMENTS is passed as a distinct process argument.
+Abort after `bs-contacts-khard-timeout' seconds or excessive output."
+  (unless (and (numberp bs-contacts-khard-timeout)
+               (> bs-contacts-khard-timeout 0))
+    (user-error "Khard timeout must be positive"))
   (let ((stdout-buffer (generate-new-buffer " *bs-contacts-khard-output*"))
         (stderr-buffer (generate-new-buffer " *bs-contacts-khard-error*"))
+        (deadline (+ (float-time) bs-contacts-khard-timeout))
         process)
     (unwind-protect
         (condition-case error-data
@@ -443,13 +470,22 @@ element of ARGUMENTS is passed as a distinct process argument."
                      :connection-type 'pipe
                      :coding 'utf-8-unix
                      :noquery t
+                     :filter #'bs-contacts--process-filter
                      :sentinel #'ignore
                      :stderr stderr-buffer))
+              (when-let* ((stderr-process (get-buffer-process stderr-buffer)))
+                (process-put stderr-process 'bs-contacts-owner process)
+                (set-process-filter stderr-process #'bs-contacts--process-filter))
               (when input
                 (process-send-string process input))
               (process-send-eof process)
               (while (process-live-p process)
+                (when (>= (float-time) deadline)
+                  (user-error "Khard %s timed out after %s seconds"
+                              operation bs-contacts-khard-timeout))
                 (accept-process-output process 0.1))
+              (when (process-get process 'bs-contacts-output-overflow)
+                (user-error "Khard %s produced excessive output" operation))
               (let ((stdout (with-current-buffer stdout-buffer
                               (buffer-string)))
                     (stderr (with-current-buffer stderr-buffer
@@ -470,6 +506,8 @@ element of ARGUMENTS is passed as a distinct process argument."
            (user-error "Cannot run khard command %s: %s"
                        bs-contacts-khard-command
                        (error-message-string error-data))))
+      (when (and process (process-live-p process))
+        (delete-process process))
       (when (buffer-live-p stdout-buffer)
         (kill-buffer stdout-buffer))
       (when (buffer-live-p stderr-buffer)
