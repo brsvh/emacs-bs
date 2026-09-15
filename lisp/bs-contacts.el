@@ -26,6 +26,8 @@
 ;; This package provides commands for managing local vCard address
 ;; books through khard and synchronizing them through vdirsyncer.
 ;; Account-specific metadata is supplied by the user's configuration.
+;; Mail completion merges khard contacts with mu4e history, cleans
+;; display names, and filters automated senders.
 
 ;;; Code:
 
@@ -100,6 +102,61 @@ missed.  A nil or non-positive value checks on every cache access."
 (defcustom bs-contacts-sync-buffer-name "*bs-contacts-sync*"
   "Name of the buffer containing vdirsyncer contact sync output."
   :type 'string
+  :group 'bs-contacts)
+
+(defcustom bs-contacts-ignored-local-part-regexp
+  (concat
+   "\\`\\(?:"
+   "abuse\\|alerts?\\|announcements?\\|automated\\|autoreply\\|"
+   "autoresponder\\|bot\\|bounces?.*\\|confirm\\(?:ation\\)?\\|"
+   "deliverystatus\\|devnull\\|digest\\|donotreply\\|"
+   "donotrespond\\|listrequest\\|mailerdaemon\\|maildaemon\\|"
+   "noreply\\|noresponse\\|newsletter\\|newsletters\\|"
+   "notifications?\\|notify\\|null\\|"
+   "passwordreset\\|phish\\(?:ing\\)?\\|postmaster\\|"
+   "reportabuse\\|reset\\|returnpath\\|spam\\|undeliverable\\|"
+   "undisclosedrecipients\\|unsubscribe\\|updates?\\|"
+   "verif\\(?:y\\|ication\\)"
+   "\\)\\'")
+  "Regexp matching compact local parts ignored by contact completion.
+
+The local part is lower-cased, truncated before a plus tag, and
+then stripped of dots, dashes, and underscores before matching.
+This intentionally focuses on automated and non-reply senders,
+not every role-based mailbox such as support or info."
+  :type 'regexp
+  :group 'bs-contacts)
+
+(defcustom bs-contacts-ignored-display-name-regexp
+  (regexp-opt
+   '("auto generated"
+     "alert"
+     "alerts"
+     "automated"
+     "delivery status"
+     "do not reply"
+     "mailer daemon"
+     "newsletter"
+     "no reply"
+     "noreply"
+     "notification"
+     "notifications"
+     "password reset"
+     "undeliverable"
+     "unsubscribe"
+     "verification")
+   'words)
+  "Regexp matching display names ignored by contact completion."
+  :type 'regexp
+  :group 'bs-contacts)
+
+(defcustom bs-contacts-ignored-email-regexps nil
+  "Regexps matching complete emails ignored by contact completion.
+
+Each regexp is matched against a lower-cased bare email address.
+The first matching regexp is reported by
+`bs-contacts-ignore-reasons'."
+  :type '(repeat regexp)
   :group 'bs-contacts)
 
 (cl-defstruct
@@ -196,10 +253,8 @@ must be a non-empty string."
             (car identity)
             (cdr identity))))
 
-(declare-function bs-mu4e-clean-mail-address "bs-mu4e" (address))
-(declare-function bs-mu4e-completion-candidate "bs-mu4e" (candidate))
-(declare-function bs-mu4e-email-address-p "bs-mu4e" (string))
-(declare-function bs-mu4e-trim-contact-name "bs-mu4e" (name))
+(defvar mu4e--contacts-set)
+
 (declare-function file-notify-rm-watch "filenotify" (descriptor))
 
 (defvar bs-contacts--cache nil
@@ -1019,11 +1074,116 @@ non-nil only after a successful deletion."
                    (format " (%s)" (string-trim output))))
         t))))
 
+(defun bs-contacts--email-address-p (string)
+  "Return non-nil when STRING is a bare email address."
+  (string-match-p "\\`[^[:space:]<>@]+@[^[:space:]<>@]+\\'" string))
+
+(defun bs-contacts--trim-contact-name (name)
+  "Return NAME without wrapper quotes or a trailing email address."
+  (when (stringp name)
+    (let ((name (string-trim
+                 (replace-regexp-in-string "[\n\r][ \t]+" " " name))))
+      (dotimes (_ 2)
+        (when (and (> (length name) 1)
+                   (string-prefix-p "\"" name)
+                   (string-suffix-p "\"" name))
+          (setq name (string-trim (substring name 1 -1))))
+        (setq name
+              (string-trim
+               (replace-regexp-in-string
+                "[[:space:]]*<[^<>[:space:]]+@[^<>[:space:]]+>\\'"
+                ""
+                name))))
+      (unless (or (string-empty-p name)
+                  (bs-contacts--email-address-p name))
+        name))))
+
+(defun bs-contacts--clean-mail-address (address)
+  "Return ADDRESS with its display name normalized.
+
+Remove wrapper quotes and a trailing embedded email address from
+display names.  Bare email names fall back to the email address
+alone."
+  (cond
+   ((not (stringp address)) address)
+   ((string-match-p
+     (concat "\\`[[:space:]\n\r]*<[^<>[:space:]]+@"
+             "[^<>[:space:]]+>[[:space:]\n\r]*\\'")
+     address)
+    (string-trim address))
+   (t
+    (let* ((parsed (mail-header-parse-address-lax address))
+           (email (if (consp parsed) (car parsed) parsed))
+           (name (and (consp parsed)
+                      (bs-contacts--trim-contact-name (cdr parsed)))))
+      (cond
+       ((not (and (stringp email) (not (string-empty-p email))))
+        address)
+       (name (format "%s <%s>" name email))
+       (t email))))))
+
+(defun bs-contacts--email-compact-local-part (email)
+  "Return EMAIL's local part normalized for ignore-rule matching."
+  (when (and (stringp email)
+             (string-match "\\`\\([^@]+\\)@" email))
+    (let ((local-part (downcase (match-string 1 email))))
+      (car (split-string
+            (replace-regexp-in-string "[-_.]" "" local-part)
+            "\\+"
+            t)))))
+
+(defun bs-contacts-ignore-reasons (address)
+  "Return an alist explaining why ADDRESS is hidden from completion.
+
+Possible keys are `email-regexp', `local-part', and `display-name'.
+The associated value is respectively the matching complete-email
+regexp, compact local part, or normalized display name.  Return nil
+when ADDRESS is not ignored."
+  (let* ((parsed (and (stringp address)
+                      (mail-header-parse-address-lax address)))
+         (email (if (consp parsed) (car parsed) parsed))
+         (email (and (stringp email)
+                     (downcase (string-trim email))))
+         (name (and (consp parsed)
+                    (bs-contacts--trim-contact-name (cdr parsed))))
+         (name (and name (downcase name)))
+         (local-part (bs-contacts--email-compact-local-part email))
+         (email-regexp
+          (and email
+               (cl-find-if
+                (lambda (regexp)
+                  (string-match-p regexp email))
+                bs-contacts-ignored-email-regexps))))
+    (delq
+     nil
+     (list
+      (and email-regexp (cons 'email-regexp email-regexp))
+      (and local-part
+           (string-match-p
+            bs-contacts-ignored-local-part-regexp
+            local-part)
+           (cons 'local-part local-part))
+      (and name
+           (string-match-p
+            bs-contacts-ignored-display-name-regexp
+            name)
+           (cons 'display-name name))))))
+
+(defun bs-contacts--ignored-mail-address-p (address)
+  "Return non-nil when ADDRESS looks like an automated sender."
+  (and (bs-contacts-ignore-reasons address) t))
+
+(defun bs-contacts--completion-candidate (candidate)
+  "Return normalized CANDIDATE, or nil when it should be hidden."
+  (when (stringp candidate)
+    (let ((candidate (bs-contacts--clean-mail-address candidate)))
+      (unless (bs-contacts--ignored-mail-address-p candidate)
+        candidate))))
+
 (defun bs-contacts--contact-mail-candidates (contact)
   "Return one khard mail candidate per email address in CONTACT."
-  (require 'bs-mu4e)
   (let ((name
-         (bs-mu4e-trim-contact-name
+         (bs-contacts--trim-contact-name
           (bs-contacts-contact-name contact))))
     (mapcar
      (lambda (email)
@@ -1032,7 +1192,7 @@ non-nil only after a successful deletion."
                    (format "%s <%s>" name email)
                  email))
               (clean-display
-               (bs-mu4e-clean-mail-address display)))
+               (bs-contacts--clean-mail-address display)))
          (bs-contacts-mail-candidate-create
           :email email
           :display clean-display
@@ -1050,23 +1210,21 @@ email addresses produce none."
 
 (defun bs-contacts--normalized-email (address)
   "Return the normalized email identity parsed from ADDRESS, or nil."
-  (require 'bs-mu4e)
   (let* ((parsed (and (stringp address)
                       (mail-header-parse-address-lax address)))
          (email (if (consp parsed) (car parsed) parsed)))
     (when (and (stringp email)
-               (bs-mu4e-email-address-p (string-trim email)))
+               (bs-contacts--email-address-p (string-trim email)))
       (downcase (string-trim email)))))
 
 (defun bs-contacts--mu4e-mail-candidates (contacts-set)
   "Return cleaned mail candidates from mu4e CONTACTS-SET."
-  (require 'bs-mu4e)
   (let (candidates)
     (when (hash-table-p contacts-set)
       (maphash
        (lambda (display _value)
          (when-let* ((clean-display
-                      (bs-mu4e-completion-candidate display))
+                      (bs-contacts--completion-candidate display))
                      (email
                       (bs-contacts--normalized-email clean-display)))
            (push
@@ -1085,8 +1243,7 @@ The return value is a hash table compatible with
 `mu4e--contacts-set'.  Candidates are deduplicated by normalized email
 address.  Khard is authoritative: when both sources contain the same
 email, its cleaned display name replaces the mu4e history name.
-Existing bs-mu4e automated-sender filters apply to both sources."
-  (require 'bs-mu4e)
+Automated-sender filters apply to both sources."
   (let ((by-email (make-hash-table :test #'equal))
         (completion-set (make-hash-table :test #'equal)))
     (dolist (candidate
@@ -1096,7 +1253,7 @@ Existing bs-mu4e automated-sender filters apply to both sources."
                by-email))
     (dolist (candidate (bs-contacts--khard-mail-candidates))
       (when-let* ((display
-                   (bs-mu4e-completion-candidate
+                   (bs-contacts--completion-candidate
                     (bs-contacts-mail-candidate-display candidate)))
                   (email
                    (bs-contacts--normalized-email
@@ -1111,6 +1268,57 @@ Existing bs-mu4e automated-sender filters apply to both sources."
                 completion-set))
      by-email)
     completion-set))
+
+(defun bs-contacts--clean-mu4e-completion-set ()
+  "Return a cleaned copy of `mu4e--contacts-set'."
+  (when (and (boundp 'mu4e--contacts-set)
+             (hash-table-p mu4e--contacts-set))
+    (let ((contacts (make-hash-table
+                     :test 'equal
+                     :size (hash-table-count mu4e--contacts-set))))
+      (maphash
+       (lambda (candidate _value)
+         (when-let* ((candidate
+                      (bs-contacts--completion-candidate candidate)))
+           (puthash candidate t contacts)))
+       mu4e--contacts-set)
+      contacts)))
+
+(defun bs-contacts--mu4e-completion-set ()
+  "Return khard and mu4e contacts merged for mail completion.
+
+If the khard backend is unavailable or fails, report the problem and
+return cleaned mu4e history candidates instead."
+  (condition-case error-data
+      (bs-contacts-mail-completion-set mu4e--contacts-set)
+    (error
+     (message "Khard contacts unavailable; using mu4e history: %s"
+              (error-message-string error-data))
+     (bs-contacts--clean-mu4e-completion-set))))
+
+(defun bs-contacts--mu4e-compose-complete-handler
+    (function str pred action)
+  "Call Mu4e completion FUNCTION with STR, PRED, and ACTION.
+
+Use cleaned contact candidates for the duration of the call."
+  (let ((mu4e--contacts-set
+         (or (bs-contacts--mu4e-completion-set)
+             mu4e--contacts-set)))
+    (funcall function str pred action)))
+
+;;;###autoload
+(defun bs-contacts-mu4e-completion-enable ()
+  "Use merged khard and mu4e history candidates in mu4e compose.
+
+Defer installation until `mu4e-compose' loads.  Repeated calls leave
+only one copy of the completion advice installed."
+  (interactive)
+  (with-eval-after-load 'mu4e-compose
+    (unless (advice-member-p
+             #'bs-contacts--mu4e-compose-complete-handler
+             'mu4e--compose-complete-handler)
+      (advice-add 'mu4e--compose-complete-handler :around
+                  #'bs-contacts--mu4e-compose-complete-handler))))
 
 (provide 'bs-contacts)
 ;;; bs-contacts.el ends here

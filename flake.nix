@@ -60,7 +60,6 @@
                 emacs-bs =
                   {
                     edit-indirect,
-                    elfeed,
                     khalel,
                     lib,
                     melpaBuild,
@@ -80,7 +79,6 @@
 
                     packageRequires = [
                       edit-indirect
-                      elfeed
                       khalel
                       mu4e
                       tabspaces
