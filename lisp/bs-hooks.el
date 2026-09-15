@@ -65,13 +65,22 @@
 (defvar bs-first-buffer-hook nil
   "Transient hooks run before the first opened buffer.")
 
+(defvar bs--first-hooks-run nil
+  "First-use hooks that have already started running.")
+
+(defun bs--run-first-hook (hook)
+  "Run HOOK once, marking it consumed before invoking its functions."
+  (unless (memq hook bs--first-hooks-run)
+    (push hook bs--first-hooks-run)
+    (run-hooks hook)))
+
 ;;;###autoload
 (defun run-bs-first-buffer-hook (&rest _)
   "Run `bs-first-buffer-hook'."
-  (run-hooks 'bs-first-buffer-hook)
   (advice-remove 'after-find-file 'run-bs-first-buffer-hook)
   (remove-hook 'window-buffer-change-functions 'run-bs-first-buffer-hook)
-  (remove-hook 'server-visit-hook 'run-bs-first-buffer-hook))
+  (remove-hook 'server-visit-hook 'run-bs-first-buffer-hook)
+  (bs--run-first-hook 'bs-first-buffer-hook))
 
 (defvar bs-first-file-hook nil
   "Transient hooks run before the first opened file.")
@@ -79,9 +88,9 @@
 ;;;###autoload
 (defun run-bs-first-file-hook (&rest _)
   "Run `bs-first-file-hook'."
-  (run-hooks 'bs-first-file-hook)
   (advice-remove 'after-find-file 'run-bs-first-file-hook)
-  (remove-hook 'dired-initial-position-hook 'run-bs-first-file-hook))
+  (remove-hook 'dired-initial-position-hook 'run-bs-first-file-hook)
+  (bs--run-first-hook 'bs-first-file-hook))
 
 (defvar bs-first-input-hook nil
   "Transient hooks run before the first user input.")
@@ -89,8 +98,8 @@
 ;;;###autoload
 (defun run-bs-first-input-hook (&rest _)
   "Run `bs-first-input-hook'."
-  (run-hooks 'bs-first-input-hook)
-  (remove-hook 'pre-command-hook 'run-bs-first-input-hook))
+  (remove-hook 'pre-command-hook 'run-bs-first-input-hook)
+  (bs--run-first-hook 'bs-first-input-hook))
 
 (defvar bs-first-project-hook nil
   "Transient hooks when the project has been opened.")
@@ -114,9 +123,9 @@
 ;;;###autoload
 (defun run-bs-first-ui-hook (&rest _)
   "Run `bs-first-ui-hook'."
-  (run-hooks 'bs-first-ui-hook)
   (remove-hook 'server-after-make-frame-hook 'run-bs-first-ui-hook)
-  (remove-hook 'after-init-hook 'run-bs-first-ui-hook))
+  (remove-hook 'after-init-hook 'run-bs-first-ui-hook)
+  (bs--run-first-hook 'bs-first-ui-hook))
 
 ;;;###autoload
 (progn
