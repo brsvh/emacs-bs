@@ -1,10 +1,10 @@
 {
   inputs,
-  projectRoot,
   ...
 }:
 let
   inherit (inputs)
+    elfmt
     infix
     ;
 in
@@ -18,6 +18,7 @@ in
       config,
       lib,
       pkgs,
+      system,
       ...
     }:
     {
@@ -26,8 +27,9 @@ in
           inherit
             lib
             pkgs
-            projectRoot
             ;
+
+          elfmt = elfmt.packages.${system}.elfmt;
         };
       };
 

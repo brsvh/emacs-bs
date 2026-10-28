@@ -1,7 +1,7 @@
 {
+  elfmt,
   lib,
   pkgs,
-  projectRoot,
   ...
 }:
 let
@@ -34,15 +34,6 @@ let
       mdformat-gfm-alerts
     ]
   );
-
-  elfmt =
-    pkgs.callPackage
-      (projectRoot + /tool/elfmt/package.nix)
-      {
-        inherit
-          projectRoot
-          ;
-      };
 
   formatters = with pkgs; [
     elfmt

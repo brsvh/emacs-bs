@@ -27,6 +27,16 @@ Place all Emacs Lisp files in a directory on ~load-path~, then load them with
 
 /This work is still in progress/.
 
+** Development
+
+Run ~nix develop~ for the development environment and ~nix fmt~ to format the
+project.  The Lisp formatter comes from the independent
+[[https://github.com/brsvh/emacs-elfmt][emacs-elfmt]] project, pinned in
+~tool/flake.lock~.
+
+Update both sets of dependencies with ~nix flake update~ and
+~nix flake update --flake ./tool~.
+
 ** AI assistance disclosure
 
 AI tools assisted with parts of this project's code and documentation.  The
