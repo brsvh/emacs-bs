@@ -28,6 +28,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'htmlize)
 (require 'json)
 
@@ -109,6 +110,36 @@ Return nil when no graphical font can be resolved."
    "pre { font-size: 10pt; line-height: 1.45; white-space: pre-wrap;"
    " overflow-wrap: anywhere; tab-size: 8; }\n"))
 
+(defun bs-htmlize--overlay-strings (begin end text)
+  "Splice overlay strings from BEGIN through END into TEXT.
+Include each string only in the fragment containing its endpoint."
+  (let (additions)
+    (dolist (overlay (overlays-in begin end))
+      (let* ((start (overlay-start overlay))
+             (stop (overlay-end overlay))
+             (before (overlay-get overlay 'before-string))
+             (after (overlay-get overlay 'after-string))
+             (empty (= start stop))
+             (at-start
+              (and (<= begin start)
+                   (or (< start end)
+                       (and empty (= start end (point-max)))))))
+        (when (and after
+                   (if empty at-start
+                     (and (< begin stop) (<= stop end))))
+          (push (cons (- stop begin) after) additions))
+        (when (and before at-start)
+          (push (cons (- start begin) before) additions))))
+    (if (null additions)
+        text
+      (let ((position 0) chunks)
+        (dolist (entry (cl-stable-sort additions #'< :key #'car))
+          (push (substring text position (car entry)) chunks)
+          (push (cdr entry) chunks)
+          (setq position (car entry)))
+        (push (substring text position) chunks)
+        (apply #'concat (nreverse chunks))))))
+
 (defun bs-htmlize--write-html (begin end file)
   "Write decorated text between BEGIN and END to local HTML FILE."
   (let* ((htmlize-output-type 'css)
@@ -119,7 +150,12 @@ Return nil when no graphical font can be resolved."
                   "content=\"default-src 'none';"
                   " style-src 'unsafe-inline'; font-src 'self'\">\n"
                   "<style>\n" (bs-htmlize--stylesheet) "</style>\n"))
-         (buffer (htmlize-region begin end)))
+         ;; htmlize can receive fragments smaller than an overlay.
+         (buffer
+          (cl-letf (((symbol-function
+                      'htmlize-add-before-after-strings)
+                     #'bs-htmlize--overlay-strings))
+            (htmlize-region begin end))))
     (unwind-protect
         (with-current-buffer buffer
           (let ((coding-system-for-write 'utf-8-unix))
