@@ -37,6 +37,7 @@
 (require 'bs-htmlize)
 (require 'bs-khal)
 (require 'bs-contacts)
+(require 'bs-picture)
 (require 'bs-project)
 
 (provide 'bs)
