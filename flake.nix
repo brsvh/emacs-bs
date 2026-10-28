@@ -60,6 +60,7 @@
                 emacs-bs =
                   {
                     edit-indirect,
+                    htmlize,
                     khalel,
                     lib,
                     melpaBuild,
@@ -79,6 +80,7 @@
 
                     packageRequires = [
                       edit-indirect
+                      htmlize
                       khalel
                       mu4e
                       tabspaces
