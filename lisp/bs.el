@@ -39,6 +39,7 @@
 (require 'bs-contacts)
 (require 'bs-picture)
 (require 'bs-project)
+(require 'bs-sort)
 
 (provide 'bs)
 ;;; bs.el ends here
