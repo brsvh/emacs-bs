@@ -196,10 +196,14 @@ before replacing an existing file.  Noninteractively, OVERWRITE
 permits replacement.  Render asynchronously in a temporary profile."
   (interactive
    (let* ((region (use-region-p))
+          ;; Buffer names may contain file wildcard characters.
+          (name (replace-regexp-in-string
+                 "[][?*\\\\]" ""
+                 (file-name-base
+                  (or buffer-file-name (buffer-name)))))
           (file (read-file-name
                  "Print to PDF: " nil nil nil
-                 (concat (file-name-base (or buffer-file-name
-                                             (buffer-name))) ".pdf")))
+                 (concat (if (equal name "") "buffer" name) ".pdf")))
           (overwrite (and (file-exists-p file)
                           (yes-or-no-p "Replace existing PDF? "))))
      (list (if region (region-beginning) (point-min))
