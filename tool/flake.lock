@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788342953,
-        "narHash": "sha256-EWkNM4JzBhZ/Yn1PG6lP4/QJuFAFeHYlY5gVxXu940Y=",
+        "lastModified": 1791918082,
+        "narHash": "sha256-oN9JrhRfHa7MUTdUq+11dHn7u0Z4WfEA4mhzBq0/zoQ=",
         "ref": "main",
-        "rev": "a67c0f87b63bcbdbdcb56785bec0205a2e3d6026",
-        "revCount": 362,
+        "rev": "9e29c63dde99a2d80c94b3d024c9768c01544558",
+        "revCount": 373,
         "type": "git",
         "url": "https://github.com/numtide/devshell.git"
       },
@@ -28,11 +28,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788450739,
-        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
+        "lastModified": 1790898470,
+        "narHash": "sha256-zTwuwezD0w3hpga6a6P8emidzAZFyWqlNeRBlpWOOl8=",
         "ref": "main",
-        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
-        "revCount": 494,
+        "rev": "024633cd702b10285db5cb19b40ad48d2399ba60",
+        "revCount": 497,
         "type": "git",
         "url": "https://github.com/hercules-ci/flake-parts.git"
       },
@@ -49,11 +49,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785945928,
-        "narHash": "sha256-4dLAgs76p3oKmEcns0qpLlaD7wtKccZSSMFUM1PbCaA=",
+        "lastModified": 1793112348,
+        "narHash": "sha256-VovnB7q0RnQ0+JEtN/Hgo8JsvtQz+mMCZP8lRiUK21Y=",
         "ref": "main",
-        "rev": "08548b51d9ae6582bea634eecbd4090317c2ff84",
-        "revCount": 145,
+        "rev": "e87b46dc3bdb9ad0bea5a81c40722f35c5fc3d4f",
+        "revCount": 209,
         "type": "git",
         "url": "https://github.com/brsvh/infix.git"
       },
@@ -65,11 +65,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1789286504,
-        "narHash": "sha256-eiEK7cKZORNEvX0GeF3RtNEF/JXhgf2RqSp3230q13E=",
+        "lastModified": 1792773339,
+        "narHash": "sha256-rZLrzrC6i+jnTAlvPZHogKDulY7WWDEv9hJeHieO7Zw=",
         "ref": "nixos-unstable",
-        "rev": "ef34387ddd751e1ab8857adf4676492d32eb24ec",
-        "revCount": 1073009,
+        "rev": "3ec636362e1816bc2f0888fa0fa2c69f1bc9e504",
+        "revCount": 1100280,
         "type": "git",
         "url": "https://github.com/NixOS/nixpkgs.git"
       },
